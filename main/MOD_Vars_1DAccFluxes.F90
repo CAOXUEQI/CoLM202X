@@ -7,6 +7,12 @@ module MOD_Vars_1DAccFluxes
    real(r8) :: nac              ! number of accumulation
    real(r8), allocatable :: nac_ln   (:)
 
+   real(r8), allocatable :: a_lakealb_direct_vis   (:)
+   real(r8), allocatable :: a_lakealb_direct_nir   (:)
+   real(r8), allocatable :: a_lakealb_direct_shortwave   (:)
+   real(r8), allocatable :: a_lakealb_diffuse_vis   (:)
+   real(r8), allocatable :: a_lakealb_diffuse_nir   (:)
+   real(r8), allocatable :: a_lakealb_diffuse_shortwave   (:)
    real(r8), allocatable :: a_us     (:)
    real(r8), allocatable :: a_vs     (:)
    real(r8), allocatable :: a_t      (:)
@@ -341,6 +347,12 @@ contains
       if (p_is_worker) then
          if (numpatch > 0) then
 
+            allocate (a_lakealb_direct_vis     (numpatch))
+            allocate (a_lakealb_direct_nir     (numpatch))
+            allocate (a_lakealb_direct_shortwave     (numpatch))
+            allocate (a_lakealb_diffuse_vis     (numpatch))
+            allocate (a_lakealb_diffuse_nir     (numpatch))
+            allocate (a_lakealb_diffuse_shortwave     (numpatch))
             allocate (a_us     (numpatch))
             allocate (a_vs     (numpatch))
             allocate (a_t      (numpatch))
@@ -682,6 +694,12 @@ contains
       if (p_is_worker) then
          if (numpatch > 0) then
 
+            deallocate (a_lakealb_direct_vis     )
+            deallocate (a_lakealb_direct_nir     )
+            deallocate (a_lakealb_direct_shortwave     )
+            deallocate (a_lakealb_diffuse_vis     )
+            deallocate (a_lakealb_diffuse_nir     )
+            deallocate (a_lakealb_diffuse_shortwave     )
             deallocate (a_us     )
             deallocate (a_vs     )
             deallocate (a_t      )
@@ -1022,6 +1040,12 @@ contains
          if (numpatch > 0) then
 
             ! flush the Fluxes for accumulation
+            a_lakealb_direct_vis     (:) = spval
+            a_lakealb_direct_nir     (:) = spval
+            a_lakealb_direct_shortwave     (:) = spval
+            a_lakealb_diffuse_vis     (:) = spval
+            a_lakealb_diffuse_nir     (:) = spval
+            a_lakealb_diffuse_shortwave     (:) = spval
             a_us     (:) = spval
             a_vs     (:) = spval
             a_t      (:) = spval
@@ -1365,6 +1389,7 @@ contains
       USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF
       USE MOD_TurbulenceLEddy
       use MOD_Vars_Global
+      use MOD_Lake
 #ifdef LATERAL_FLOW
       USE MOD_Hydro_Vars_1DFluxes
       USE MOD_Hydro_Hist, only: accumulate_fluxes_basin
@@ -1407,6 +1432,12 @@ contains
 
             nac = nac + 1
 
+            call acc1d (lakealb_direct_vis  , a_lakealb_direct_vis  )
+            call acc1d (lakealb_direct_nir  , a_lakealb_direct_nir  )
+            call acc1d (lakealb_direct_shortwave  , a_lakealb_direct_shortwave  )
+            call acc1d (lakealb_diffuse_vis  , a_lakealb_diffuse_vis  )
+            call acc1d (lakealb_diffuse_nir  , a_lakealb_diffuse_nir  )
+            call acc1d (lakealb_diffuse_shortwave  , a_lakealb_diffuse_shortwave  )
             call acc1d (forc_us  , a_us  )
             call acc1d (forc_vs  , a_vs  )
             call acc1d (forc_t   , a_t   )

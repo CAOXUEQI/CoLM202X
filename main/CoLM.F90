@@ -87,6 +87,7 @@ PROGRAM CoLM
    ! SNICAR
    USE MOD_SnowSnicar, only: SnowAge_init, SnowOptics_init
    USE MOD_Aerosol, only: AerosolDepInit, AerosolDepReadin
+   USE MOD_Lake,  only: LakeOptics_init
 
    IMPLICIT NONE
 
@@ -246,7 +247,10 @@ PROGRAM CoLM
    ! Read in SNICAR optical and aging parameters
    CALL SnowOptics_init( DEF_file_snowoptics ) ! SNICAR optical parameters
    CALL SnowAge_init( DEF_file_snowaging )     ! SNICAR aging   parameters
-
+   ! Read in LAKE optical parameters
+   print *, 'before read lakeoptics'
+   CALL LakeOptics_init( DEF_file_snowoptics, DEF_file_lakeopticsd, DEF_file_lakeopticsr,DEF_file_lakeicepro) 
+   print *, 'after read lakeoptics'
    !-----------------------
    doalb = .true.
    dolai = .true.
@@ -309,6 +313,7 @@ PROGRAM CoLM
 
    TIMELOOP : DO WHILE (itstamp < etstamp)
 
+      print *, "hzlllll, timeloop begin "
       CALL julian2monthday (jdate(1), jdate(2), month_p, mday_p)
 
       year_p = jdate(1)
@@ -397,7 +402,9 @@ PROGRAM CoLM
 
       ! Write out the model variables for restart run and the histroy file
       ! ----------------------------------------------------------------------
+      print *, "hzlllll, before hist_out"
       CALL hist_out (idate, deltim, itstamp, etstamp, ptstamp, dir_hist, casename)
+      print *, "hzlllll, after hist_out"
 
 #ifdef LULCC
       ! DO land USE and land cover change simulation

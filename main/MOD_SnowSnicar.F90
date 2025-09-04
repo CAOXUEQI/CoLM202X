@@ -2364,6 +2364,7 @@ contains
                 flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_abs_lcl(i,bnd_idx)
              enddo
              flx_abs(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+            !  write(*,*)'sumflx_wgt',sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
           enddo
 
           ! near-IR direct albedo/absorption adjustment for high solar zenith angles

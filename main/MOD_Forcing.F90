@@ -877,9 +877,10 @@ contains
 
       CALL ncio_read_serial (filename, 'time', forctime_sec)
       CALL ncio_get_attr    (filename, 'time', 'units', timeunit)
-
+      print*,timeunit
       timestr = timeunit(15:18) // ' ' // timeunit(20:21) // ' ' // timeunit(23:24) &
          // ' ' // timeunit(26:27) // ' ' // timeunit(29:30) // ' ' // timeunit(32:33)
+      print*,timestr
       read(timestr,*) year, month, day, hour, minute, second
 
       allocate (forctime (size(forctime_sec)))

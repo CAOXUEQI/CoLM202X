@@ -178,7 +178,6 @@ MODULE MOD_Vars_1DFluxes
      if (p_is_worker) then
 
         if (numpatch > 0) then
-
            deallocate ( taux    )  ! wind stress: E-W [kg/m/s2]
            deallocate ( tauy    )  ! wind stress: N-S [kg/m/s2]
            deallocate ( fsena   )  ! sensible heat from canopy height to atmosphere [W/m2]

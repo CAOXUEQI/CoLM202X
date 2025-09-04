@@ -126,6 +126,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro)
       ! End ozone stress variables
         zwt(i),          wdsrf(i),        wa(i),           wetwat(i),       &
         t_lake(1:,i),    lake_icefrac(1:,i),               savedtke1(i),    &
+        lakealb_direct_vis(i), lakealb_direct_nir, lakealb_direct_shortwave,&
+        lakealb_diffuse_vis(i), lakealb_diffuse_nir, lakealb_diffuse_shortwave,&
 
       ! SNICAR snow model related
         snw_rds(:,i),    ssno(:,:,:,i),                                     &
@@ -264,6 +266,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro)
 
         zwt(i)          ,wa(i)                                             ,&
         t_lake(1:,i)    ,lake_icefrac(1:,i),               savedtke1(i)    ,&
+        lakealb_direct_vis(i), lakealb_direct_nir, lakealb_direct_shortwave,&
+        lakealb_diffuse_vis(i), lakealb_diffuse_nir, lakealb_diffuse_shortwave,&
 
       ! SNICAR snow model related
         snw_rds(:,i)    ,ssno(:,:,:,i)   ,&

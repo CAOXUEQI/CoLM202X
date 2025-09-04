@@ -393,6 +393,12 @@ MODULE MOD_Vars_TimeVariables
   SAVE
 ! -----------------------------------------------------------------
 ! Time-varying state variables which reaquired by restart run
+     real(r8), allocatable :: lakealb_direct_vis   (:)
+     real(r8), allocatable :: lakealb_direct_nir   (:)
+     real(r8), allocatable :: lakealb_direct_shortwave   (:)
+     real(r8), allocatable :: lakealb_diffuse_vis   (:)
+     real(r8), allocatable :: lakealb_diffuse_nir   (:)
+     real(r8), allocatable :: lakealb_diffuse_shortwave   (:)
      real(r8), allocatable :: z_sno      (:,:) ! node depth [m]
      real(r8), allocatable :: dz_sno     (:,:) ! interface depth [m]
      real(r8), allocatable :: t_soisno   (:,:) ! soil temperature [K]
@@ -541,7 +547,12 @@ MODULE MOD_Vars_TimeVariables
      IF (p_is_worker) THEN
 
         IF (numpatch > 0) THEN
-
+           allocate (lakealb_direct_vis                      (numpatch)); lakealb_direct_vis        (:) = spval
+           allocate (lakealb_direct_nir                      (numpatch)); lakealb_direct_nir        (:) = spval 
+           allocate (lakealb_direct_shortwave                      (numpatch)); lakealb_direct_shortwave        (:) = spval
+           allocate (lakealb_diffuse_vis                      (numpatch)); lakealb_diffuse_vis        (:) = spval
+           allocate (lakealb_diffuse_nir                      (numpatch)); lakealb_diffuse_nir        (:) = spval
+           allocate (lakealb_diffuse_shortwave                      (numpatch)); lakealb_diffuse_shortwave        (:) = spval
            allocate (z_sno      (maxsnl+1:0,      numpatch)); z_sno       (:,:) = spval
            allocate (dz_sno     (maxsnl+1:0,      numpatch)); dz_sno      (:,:) = spval
            allocate (t_soisno   (maxsnl+1:nl_soil,numpatch)); t_soisno    (:,:) = spval
@@ -695,7 +706,12 @@ MODULE MOD_Vars_TimeVariables
      IF (p_is_worker) THEN
 
         IF (numpatch > 0) THEN
-
+           deallocate (lakealb_direct_vis                 )
+           deallocate (lakealb_direct_nir                 )
+           deallocate (lakealb_direct_shortwave                 )
+           deallocate (lakealb_diffuse_vis                 )
+           deallocate (lakealb_diffuse_nir                 )
+           deallocate (lakealb_diffuse_shortwave                 )
            deallocate (z_sno                  )
            deallocate (dz_sno                 )
            deallocate (t_soisno               )
@@ -920,6 +936,12 @@ ENDIF
      CALL ncio_define_dimension_vector (file_restart, landpatch, 'rtyp', 2)
 
      ! Time-varying state variables which reaquired by restart run
+     CALL ncio_write_vector (file_restart, 'lakealb_direct_vis',    'patch', landpatch, lakealb_direct_vis, compress)
+     CALL ncio_write_vector (file_restart, 'lakealb_direct_nir',    'patch', landpatch, lakealb_direct_nir, compress) 
+     CALL ncio_write_vector (file_restart, 'lakealb_direct_shortwave',    'patch', landpatch, lakealb_direct_shortwave, compress)
+     CALL ncio_write_vector (file_restart, 'lakealb_diffuse_vis',    'patch', landpatch, lakealb_diffuse_vis, compress)
+     CALL ncio_write_vector (file_restart, 'lakealb_diffuse_nir',    'patch', landpatch, lakealb_diffuse_nir, compress)
+     CALL ncio_write_vector (file_restart, 'lakealb_diffuse_shortwave',    'patch', landpatch, lakealb_diffuse_shortwave, compress) 
      CALL ncio_write_vector (file_restart, 'z_sno   '   , 'snow', -maxsnl, 'patch', landpatch, z_sno , compress)                 ! node depth [m]
      CALL ncio_write_vector (file_restart, 'dz_sno  '   , 'snow', -maxsnl, 'patch', landpatch, dz_sno, compress)                 ! interface depth [m]
      CALL ncio_write_vector (file_restart, 't_soisno'   , 'soilsnow', nl_soil-maxsnl, 'patch', landpatch, t_soisno   , compress) ! soil temperature [K]
@@ -1082,6 +1104,12 @@ ENDIF
      file_restart = trim(dir_restart) // '/' // trim(site) //'_restart_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
 
      ! Time-varying state variables which reaquired by restart run
+     CALL ncio_read_vector (file_restart, 'lakealb_direct_vis  ',    landpatch, lakealb_direct_vis     )
+     CALL ncio_read_vector (file_restart, 'lakealb_direct_nir  ',    landpatch, lakealb_direct_nir     )
+     CALL ncio_read_vector (file_restart, 'lakealb_direct_vis  ',    landpatch, lakealb_direct_shortwave     )
+     CALL ncio_read_vector (file_restart, 'lakealb_diffuse_vis  ',    landpatch, lakealb_diffuse_vis     )
+     CALL ncio_read_vector (file_restart, 'lakealb_diffuse_nir  ',    landpatch, lakealb_diffuse_nir     )
+     CALL ncio_read_vector (file_restart, 'lakealb_diffuse_shortwave  ',    landpatch, lakealb_diffuse_shortwave     )
      CALL ncio_read_vector (file_restart, 'z_sno   '   , -maxsnl, landpatch, z_sno )             ! node depth [m]
      CALL ncio_read_vector (file_restart, 'dz_sno  '   , -maxsnl, landpatch, dz_sno)             ! interface depth [m]
      CALL ncio_read_vector (file_restart, 't_soisno'   , nl_soil-maxsnl, landpatch, t_soisno   ) ! soil temperature [K]
@@ -1228,7 +1256,12 @@ ENDIF
      IF (p_is_master) THEN
         write(*,'(/,A27)') 'Checking Time Variables ...'
      ENDIF
-
+     CALL check_vector_data ('lakealb direct vis     []     ', lakealb_direct_vis     )
+     CALL check_vector_data ('lakealb direct nir     []     ', lakealb_direct_nir     )
+     CALL check_vector_data ('lakealb direct shortwave     []     ', lakealb_direct_shortwave     )
+     CALL check_vector_data ('lakealb diffuse vis     []     ', lakealb_diffuse_vis     )
+     CALL check_vector_data ('lakealb diffuse nir     []     ', lakealb_diffuse_nir     )
+     CALL check_vector_data ('lakealb diffuse shortwave     []     ', lakealb_diffuse_shortwave     )
      CALL check_vector_data ('t_grnd      [K]    ', t_grnd     ) ! ground surface temperature [K]
      CALL check_vector_data ('tleaf       [K]    ', tleaf      ) ! leaf temperature [K]
      CALL check_vector_data ('ldew        [mm]   ', ldew       ) ! depth of water on foliage [mm]

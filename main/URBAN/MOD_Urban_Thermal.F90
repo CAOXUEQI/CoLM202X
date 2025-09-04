@@ -68,7 +68,10 @@ CONTAINS
         t_gimpsno      ,t_gpersno      ,t_lakesno      ,wliq_roofsno   ,&
         wliq_gimpsno   ,wliq_gpersno   ,wliq_lakesno   ,wice_roofsno   ,&
         wice_gimpsno   ,wice_gpersno   ,wice_lakesno   ,t_lake         ,&
-        lake_icefrac   ,savedtke1      ,lveg           ,tleaf          ,&
+        lake_icefrac   ,savedtke1      ,lakealb_direct_vis, lakealb_direct_nir        ,&
+        lakealb_direct_shortwave, lakealb_diffuse_vis        ,&
+        lakealb_diffuse_nir,      lakealb_diffuse_shortwave   ,&
+        lveg           ,tleaf,&
         ldew           ,troom          ,troof_inner    ,twsun_inner    ,&
         twsha_inner    ,troommax       ,troommin       ,tafu           ,&
 
@@ -94,7 +97,7 @@ CONTAINS
         respc          ,errore         ,emis           ,z0m            ,&
         zol            ,rib            ,ustar          ,qstar          ,&
         tstar          ,fm             ,fh             ,fq             ,&
-        hpbl                                                            )
+        hpbl                                     )
 
 !=======================================================================
 ! this is the main subroutine to execute the calculation
@@ -306,6 +309,12 @@ CONTAINS
         wliq_lakesno(maxsnl+1:nl_soil) ,&! liqui water [kg/m2]
         wice_lakesno(maxsnl+1:nl_soil) ,&! ice lens [kg/m2]
         savedtke1  ,&! top level eddy conductivity (W/m K)
+        lakealb_direct_vis    ,&! lake albedo
+        lakealb_direct_nir    ,&! lake albedo
+        lakealb_direct_shortwave    ,&! lake albedo
+        lakealb_diffuse_vis    ,&! lake albedo
+        lakealb_diffuse_nir    ,&! lake albedo
+        lakealb_diffuse_shortwave    ,&! lake albedo
         scv_roof   ,&! snow cover, water equivalent [mm, kg/m2]
         scv_gimp   ,&! snow cover, water equivalent [mm, kg/m2]
         scv_gper   ,&! snow cover, water equivalent [mm, kg/m2]
@@ -420,11 +429,13 @@ CONTAINS
 
 !---------------------Local Variables-----------------------------------
 
-  INTEGER :: nurb    ! number of aboveground urban components [-]
+  INTEGER :: nurb! number of aboveground urban components [-]
+
 
   LOGICAL :: doveg   ! run model with vegetation
 
   REAL(r8) :: &
+        snw_rds(maxsnl+1:0)      ,&
         fg         ,&! ground fraction ( impervious + soil + snow )
         fsenroof   ,&! sensible heat flux from roof [W/m2]
         fsenwsun   ,&! sensible heat flux from sunlit wall [W/m2]
@@ -448,6 +459,39 @@ CONTAINS
         dqroofdT   ,&! d(qroof)/dT
         dqgimpdT   ,&! d(qgimp)/dT
         dqgperdT   ,&! d(qgper)/dT
+        sabgv,      &! direct beam vis solar absorbed by ground  [W/m2]
+        sabgvd,     &! diffuse beam vis solar absorbed by ground  [W/m2]
+        sabgvdu,    &! diffuse beam vis solar reflected by ground  [W/m2]
+        sabgvda,    &! diffuse beam vis solar reflected and absorbed by ground  [W/m2]
+        sabgn,      &! direct beam nir solar absorbed by ground  [W/m2]
+        sabgnd,     &! diffuse beam nir solar absorbed by ground  [W/m2] 
+        
+        
+        h2osno,     &
+        frac_sno,   &
+      !   mss_cnc_aer_in( maxsnl+1:0, 1:sno_nbr_aer ),&
+        mss_bcphi ( maxsnl+1:0 ),&
+        mss_bcpho ( maxsnl+1:0 ),&
+        mss_ocphi ( maxsnl+1:0 ),&
+        mss_ocpho ( maxsnl+1:0 ),&
+        mss_dst1  ( maxsnl+1:0 ),&
+        mss_dst2  ( maxsnl+1:0 ),&
+        mss_dst3  ( maxsnl+1:0 ),&
+        mss_dst4  ( maxsnl+1:0 ),&
+        albsfc( 1:numrad ),     &
+        flx_abs ( maxsnl+1:1 , 1:numrad ),    &
+        h2osno_ice     ( maxsnl+1:0 ),    &
+        h2osno_liq     ( maxsnl+1:0 ),&
+        fsno,&
+        scvold,&
+        sag,&
+        ssi,&
+        wimp,&
+        pg_rain,&
+        pg_snow,&
+        forc_aer(14),&
+        fiold( maxsnl+1:0 ),&
+
 
         degdT      ,&! d(eg)/dT
         eg         ,&! water vapor pressure at temperature T [pa]
@@ -993,7 +1037,12 @@ CONTAINS
            porsl        ,csol         ,k_solids        , &
            dksatu       ,dksatf       ,dkdry           , &
            BA_alpha     ,BA_beta      ,hpbl            , &
-
+           patchlonr    , idate       ,sabgv           , &
+           sabgvd       , sabgvda     ,sabgvdu         , sabgn           ,&
+           sabgnd       ,snw_rds,&
+           mss_bcpho    ,mss_bcphi    ,mss_ocpho       ,mss_ocphi       ,&
+           mss_dst1     ,mss_dst2     ,mss_dst3        ,mss_dst4,  &
+           fsno,   scvold,sag,ssi,wimp,pg_rain,pg_snow,forc_aer,fiold,&       
            ! "inout" laketem arguments
            ! ---------------------------
            tlake        ,scv_lake     ,snowdp_lake     ,t_lakesno       ,&
@@ -1013,6 +1062,9 @@ CONTAINS
            trad_lake    ,emis_lake    ,z0m_lake        ,zol_lake        ,&
            rib_lake     ,ustar_lake   ,qstar_lake      ,tstar_lake      ,&
            fm_lake      ,fh_lake      ,fq_lake         ,sm_lake         ,&
+           lakealb_direct_vis,  lakealb_diffuse_vis   , &
+           lakealb_direct_nir,  lakealb_diffuse_nir   ,&
+           lakealb_direct_shortwave,lakealb_diffuse_shortwave,      &
            urban_call=.true.                                             )
 
       lnet_lake = forc_frl - olrg_lake

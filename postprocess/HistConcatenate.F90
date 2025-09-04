@@ -70,6 +70,22 @@ program hist_concatenate
 
    ENDIF
 
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_direct_vis   ', timelen, compress, &
+   'lake direct albedo vis','%')
+
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_direct_nir   ', timelen, compress, &
+   'lake direct albedo nir','%')
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_direct_shortwave   ', timelen, compress, &
+   'lake direct albedo shortwave','%')
+
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_diffuse_vis   ', timelen, compress, &
+   'lake diffuse albedo vis','%')
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_diffuse_nir   ', timelen, compress, &
+   'lake diffuse albedo nir','%')
+
+   call hist_concatenate_var_2d (filehist, 'f_lakealb_diffuse_shortwave   ', timelen, compress, &
+   'lake diffuse albedo shortwave','%')
+
    call hist_concatenate_var_2d (filehist, 'f_taux   ', timelen, compress, &
       'wind stress: E-W','kg/m/s2')
 

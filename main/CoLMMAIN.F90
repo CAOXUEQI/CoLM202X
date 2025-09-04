@@ -62,7 +62,9 @@ SUBROUTINE CoLMMAIN ( &
            lai_old,      o3uptakesun,  o3uptakesha,  forc_ozone,    &
            !End ozone stress variables
            zwt,          wdsrf,        wa,           wetwat,        &
-           t_lake,       lake_icefrac, savedtke1,                   &
+           t_lake,       lake_icefrac, savedtke1,    lakealb_direct_vis,   lakealb_direct_nir,    &
+           lakealb_direct_shortwave, lakealb_diffuse_vis        ,&
+           lakealb_diffuse_nir,      lakealb_diffuse_shortwave   ,&           
 
          ! SNICAR snow model related
            snw_rds,      ssno,                                      &
@@ -87,7 +89,7 @@ SUBROUTINE CoLMMAIN ( &
            srvi,         srnd,         srni,         solvdln,       &
            solviln,      solndln,      solniln,      srvdln,        &
            srviln,       srndln,       srniln,       qcharge,       &
-           xerr,         zerr,                                      &
+           xerr,         zerr,          &
 
          ! TUNABLE modle constants
            zlnd,         zsno,         csoilc,       dewmx,         &
@@ -314,7 +316,12 @@ SUBROUTINE CoLMMAIN ( &
         wice_soisno(maxsnl+1:nl_soil) ,&! ice lens (kg/m2)
         hk(1:nl_soil)                 ,&! hydraulic conductivity [mm h2o/s]
         smp(1:nl_soil)                ,&! soil matrix potential [mm]
-
+        lakealb_direct_vis               ,&! lake albedo  
+        lakealb_direct_nir               ,&! lake albedo  
+        lakealb_direct_shortwave               ,&! lake albedo  
+        lakealb_diffuse_vis               ,&! lake albedo  
+        lakealb_diffuse_nir               ,&! lake albedo  
+        lakealb_diffuse_shortwave               ,&! lake albedo  
         t_lake(nl_lake)       ,&! lake temperature (kelvin)
         lake_icefrac(nl_lake) ,&! lake mass fraction of lake layer that is frozen
         savedtke1             ,&! top level eddy conductivity (W/m K)
@@ -475,7 +482,20 @@ SUBROUTINE CoLMMAIN ( &
         wt          ,&! fraction of vegetation buried (covered) by snow [-]
         z_soisno (maxsnl+1:nl_soil), &! layer depth (m)
         dz_soisno(maxsnl+1:nl_soil), &! layer thickness (m)
-        zi_soisno(maxsnl  :nl_soil)   ! interface level below a "z" level (m)
+        zi_soisno(maxsnl  :nl_soil), &! interface level below a "z" level (m)
+        sabgv,     &! direct beam vis solar absorbed by ground  [W/m2]
+        sabgvd,     &! diffuse beam vis solar absorbed by ground  [W/m2]
+        sabgvdu,    &! diffuse beam vis solar reflected by ground  [W/m2]
+        sabgvda,    &! diffuse beam vis solar reflected and absorbed by ground  [W/m2]
+        sabgn,      &! direct beam nir solar absorbed by ground  [W/m2]
+        sabgnd,     &! diffuse beam nir solar absorbed by ground  [W/m2] 
+        h2osno,     &
+        frac_sno,   &
+        mss_cnc_aer_in( maxsnl+1:0, 1:sno_nbr_aer ),&
+        albsfc( 1:numrad ),     &
+        h2osno_liq     ( maxsnl+1:0 ),&
+        h2osno_ice     ( maxsnl+1:0 ), &
+        flx_abs ( maxsnl+1:1 , 1:numrad )
 
    real(r8) :: &
         prc_rain    ,&! convective rainfall [kg/(m2 s)]
@@ -531,6 +551,7 @@ SUBROUTINE CoLMMAIN ( &
       real(r8) :: fq_fld         ! integral of profile function for moisture
 #endif
 
+      ! print *, "hzlllll, colmmain begin"
       ! 09/2022, yuan: move from CoLMDRIVER to avoid using stack memory
       z_soisno (maxsnl+1:0) = z_sno (maxsnl+1:0)
       z_soisno (1:nl_soil ) = z_soi (1:nl_soil )
@@ -562,6 +583,7 @@ SUBROUTINE CoLMMAIN ( &
                      forc_sols,forc_soll,forc_solsd,forc_solld,&
                      alb,ssun,ssha,lai,sai,rho,tau,ssno,&
                      parsun,parsha,sabvsun,sabvsha,sabg,sabg_lyr,sr,&
+                     sabgv,sabgvd,sabgvda,sabgvdu,sabgn,sabgnd,&
                      solvd,solvi,solnd,solni,srvd,srvi,srnd,srni,&
                      solvdln,solviln,solndln,solniln,srvdln,srviln,srndln,srniln)
 
@@ -1092,6 +1114,12 @@ ELSE IF(patchtype == 4) THEN   ! <=== is LAND WATER BODIES (lake, reservior and 
            porsl        ,csol         ,k_solids        , &
            dksatu       ,dksatf       ,dkdry           , &
            BA_alpha     ,BA_beta      ,forc_hpbl       , &
+           patchlonr    , idate       ,sabgv           , &
+           sabgvd       ,sabgvda      ,sabgvdu         ,sabgn           ,&
+           sabgnd       ,snw_rds,& 
+           mss_bcpho    ,mss_bcphi    ,mss_ocpho       ,mss_ocphi       ,&
+           mss_dst1     ,mss_dst2     ,mss_dst3        ,mss_dst4,   & 
+           fsno,   scvold,sag,ssi,wimp,pg_rain,pg_snow,forc_aer,fiold(:0),&      
 
            ! "inout" laketem arguments
            ! ---------------------------
@@ -1111,8 +1139,11 @@ ELSE IF(patchtype == 4) THEN   ! <=== is LAND WATER BODIES (lake, reservior and 
            olrg         ,fgrnd        ,tref            ,qref            ,&
            trad         ,emis         ,z0m             ,zol             ,&
            rib          ,ustar        ,qstar           ,tstar           ,&
-           fm           ,fh           ,fq              ,sm               )
-
+           fm           ,fh           ,fq              ,sm              ,&
+            lakealb_direct_vis,  lakealb_diffuse_vis   , &
+           lakealb_direct_nir,  lakealb_diffuse_nir   ,&
+           lakealb_direct_shortwave,lakealb_diffuse_shortwave            )
+      write(*,*)"laketemp end"
       CALL snowwater_lake ( &
            ! "in" snowater_lake arguments
            ! ---------------------------
@@ -1135,7 +1166,7 @@ ELSE IF(patchtype == 4) THEN   ! <=== is LAND WATER BODIES (lake, reservior and 
            mss_dst1     ,mss_dst2     ,mss_dst3        ,mss_dst4         &
 ! END SNICAR model variables
            )
-
+      write(*,*)"lakewater end"
       ! We assume the land water bodies have zero extra liquid water capacity
       ! (i.e.,constant capacity), all excess liquid water are put into the runoff,
       ! this unreasonable assumption should be updated in the future version
@@ -1169,13 +1200,14 @@ ELSE IF(patchtype == 4) THEN   ! <=== is LAND WATER BODIES (lake, reservior and 
       
       ! Set zero to the empty node
       IF (snl > maxsnl) THEN
+         write(*,*) 'wice', maxsnl+1, snl 
          wice_soisno(maxsnl+1:snl) = 0.
          wliq_soisno(maxsnl+1:snl) = 0.
          t_soisno   (maxsnl+1:snl) = 0.
          z_soisno   (maxsnl+1:snl) = 0.
          dz_soisno  (maxsnl+1:snl) = 0.
       ENDIF
-
+      write(*,*)"lakeall end"
 !======================================================================
 
 ELSE                     ! <=== is OCEAN (patchtype >= 99)
@@ -1433,7 +1465,7 @@ ENDIF
     ! 09/2022, yuan: move from CoLMDRIVER to avoid using stack memory
     z_sno (maxsnl+1:0) = z_soisno (maxsnl+1:0)
     dz_sno(maxsnl+1:0) = dz_soisno(maxsnl+1:0)
-
+    write(*,*)'colmmain end' 
 !----------------------------------------------------------------------
 
 END SUBROUTINE CoLMMAIN

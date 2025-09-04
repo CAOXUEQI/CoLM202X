@@ -73,8 +73,9 @@ SUBROUTINE UrbanCoLMMAIN ( &
            twsha_inner  ,t_roommax    ,t_roommin    ,tafu         ,&
 
            zwt          ,wa                                       ,&
-           t_lake       ,lake_icefrac ,savedtke1                  ,&
-
+           t_lake       ,lake_icefrac ,savedtke1,   lakealb_direct_vis, lakealb_direct_nir        ,&
+           lakealb_direct_shortwave, lakealb_diffuse_vis        ,&
+           lakealb_diffuse_nir,      lakealb_diffuse_shortwave   ,&
          ! SNICAR snow model related
            snw_rds,      ssno,                                     &
            mss_bcpho,    mss_bcphi,   mss_ocpho,     mss_ocphi,    &
@@ -332,7 +333,12 @@ SUBROUTINE UrbanCoLMMAIN ( &
         t_lake      (nl_lake) ,&! lake temperature (kelvin)
         lake_icefrac(nl_lake) ,&! lake mass fraction of lake layer that is frozen
         savedtke1             ,&! top level eddy conductivity (W/m K)
-
+        lakealb_direct_vis    ,&! lake albedo
+        lakealb_direct_nir    ,&! lake albedo
+        lakealb_direct_shortwave    ,&! lake albedo
+        lakealb_diffuse_vis    ,&! lake albedo
+        lakealb_diffuse_nir    ,&! lake albedo
+        lakealb_diffuse_shortwave    ,&! lake albedo
         t_grnd     ,&! ground surface temperature [k]
         tleaf      ,&! sunlit leaf temperature [K]
         !tmax       ,&! Diurnal Max 2 m height air temperature [kelvin]
@@ -522,6 +528,10 @@ SUBROUTINE UrbanCoLMMAIN ( &
         sabwsha    ,&! solar absorbed by vegetation [W/m2]
         sabgimp    ,&! solar absorbed by vegetation [W/m2]
         sabgper    ,&! solar absorbed by vegetation [W/m2]
+        sabgv,     &! direct beam vis solar absorbed by ground  [W/m2]
+        sabgvd,      &! diffuse beam vis solar absorbed by ground  [W/m2]
+        sabgvdu,    &! diffuse beam vis solar reflected by ground  [W/m2]
+        sabgvda,    &! diffuse beam vis solar reflected and absorbed by ground  [W/m2]
         sablake    ,&! solar absorbed by vegetation [W/m2]
         par        ,&! PAR by leaves [W/m2]
         tgimp      ,&! temperature of impervious surface [K]
@@ -884,6 +894,7 @@ SUBROUTINE UrbanCoLMMAIN ( &
          sabgimp              ,sabgper              ,sablake              ,sabv                 ,&
          par                  ,Fhac                 ,Fwst                 ,Fach                 ,&
          Fahe                 ,Fhah                 ,vehc                 ,meta                 ,&
+
          ! LUCY INPUT PARAMETERS
          fix_holiday          ,week_holiday         ,hum_prof             ,pop_den              ,&
          vehicle              ,weh_prof             ,wdh_prof             ,idate                ,&
@@ -925,7 +936,10 @@ SUBROUTINE UrbanCoLMMAIN ( &
          t_gimpsno(lbi:)      ,t_gpersno(lbp:)      ,t_lakesno(:)         ,wliq_roofsno(lbr:)   ,&
          wliq_gimpsno(lbi:)   ,wliq_gpersno(lbp:)   ,wliq_lakesno(:)      ,wice_roofsno(lbr:)   ,&
          wice_gimpsno(lbi:)   ,wice_gpersno(lbp:)   ,wice_lakesno(:)      ,t_lake(:)            ,&
-         lake_icefrac(:)      ,savedtke1            ,lveg                 ,tleaf                ,&
+         lake_icefrac(:)      ,savedtke1            ,lakealb_direct_vis, lakealb_direct_nir        ,&
+        lakealb_direct_shortwave, lakealb_diffuse_vis        ,&
+        lakealb_diffuse_nir,      lakealb_diffuse_shortwave   ,&
+         lveg                 ,tleaf,&
          ldew                 ,t_room               ,troof_inner          ,twsun_inner          ,&
          twsha_inner          ,t_roommax            ,t_roommin            ,tafu                 ,&
 
@@ -951,7 +965,7 @@ SUBROUTINE UrbanCoLMMAIN ( &
          respc                ,errore               ,emis                 ,z0m                  ,&
          zol                  ,rib                  ,ustar                ,qstar                ,&
          tstar                ,fm                   ,fh                   ,fq                   ,&
-         hpbl                                                                                    )
+         hpbl                 )
 
 !----------------------------------------------------------------------
 ! [4] Urban hydrology

@@ -1,0 +1,65 @@
+&nl_colm
+   
+   DEF_CASE_NAME = 'Ngoring_oneband'
+   
+   ! surface data from SITE.
+   SITE_fsrfdata = '/stu01/caoxq18/ISIMIP_srfdata/Surfacedata_Ngoring.nc'
+   ! path to surface database
+   DEF_dir_rawdata = '/tera07/CoLMrawdata/'
+   DEF_dir_runtime = '/tera07/CoLMruntime/'
+
+   ! true  : surface data from SITE
+   ! false : surface data is retrieved from database.
+   USE_SITE_pctpfts         = .false.
+   USE_SITE_pctcrop         = .false.
+   USE_SITE_htop            = .false.
+   USE_SITE_LAI             = .false. 
+   USE_SITE_lakedepth       = .true.
+   USE_SITE_soilreflectance = .false.
+   USE_SITE_soilparameters  = .false.
+   USE_SITE_topography      = .false.
+
+   DEF_simulation_time%greenwich     = .true.
+   DEF_simulation_time%start_year = 2010   
+   DEF_simulation_time%start_month   = 1
+   DEF_simulation_time%start_day     = 1
+   DEF_simulation_time%start_sec     = 1800
+   DEF_simulation_time%end_year = 2016      
+   DEF_simulation_time%end_month     = 12
+   DEF_simulation_time%end_day       = 31
+   DEF_simulation_time%end_sec       = 0
+   DEF_simulation_time%spinup_year = 2015   
+   DEF_simulation_time%spinup_month  = 1
+   DEF_simulation_time%spinup_day    = 1
+   DEF_simulation_time%spinup_sec    = 0
+   DEF_simulation_time%spinup_repeat = 1
+
+   DEF_simulation_time%timestep     = 3600.
+   
+   DEF_dir_output = '/stu01/caoxq18/cases/ISIMIP/Ngoring/'
+   
+   ! LAI setting
+   DEF_LAI_MONTHLY = .true.
+
+   !! irrigation method
+   !DEF_IRRIGATION_METHOD = 1 ! 1:drip; 2:sprinkler; 3:flood; 4:paddy
+
+   ! Canopy DEF Interception scheme selection
+   DEF_Interception_scheme = 1 ! 1:CoLM2014；2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC
+   
+   ! ----- forcing -----
+   DEF_forcing_namelist = '/stu01/caoxq18/Colm_lake_all/CoLM202X/run/forcing/ISIMIP/Ngoring.nml'
+
+   ! ----- history -----
+   DEF_hist_lon_res = 1.
+   DEF_hist_lat_res = 1. 
+   DEF_WRST_FREQ = 'YEARLY'   ! write restart file frequency: HOURLY/DAILY/MONTHLY/YEARLY
+   DEF_HIST_FREQ = 'DAILY'    ! write history file frequency: HOURLY/DAILY/MONTHLY/YEARLY
+   DEF_HIST_groupby = 'YEAR'  ! history in one file: DAY/MONTH/YEAR
+   DEF_REST_COMPRESS_LEVEL = 0
+   DEF_HIST_COMPRESS_LEVEL = 0
+   
+   DEF_hist_vars_namelist = '/stu01/caoxq18/Colm_lake_all/CoLM202X/run/history.nml'
+   DEF_hist_vars_out_default = .true.
+
+/

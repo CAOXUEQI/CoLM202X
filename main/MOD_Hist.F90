@@ -210,6 +210,7 @@ contains
             write(*,*) 'Warning : Please use one of DAY/MONTH/YEAR for history group.'
          end if
 
+         print *, "hzllllll, before hist_write_time"
 #if(defined CaMa_Flood)
          ! add variables to write cama-flood output.
          ! file name of cama-flood output
@@ -222,6 +223,7 @@ contains
 
          call hist_write_time (file_hist, 'time', idate, itime_in_file)
 
+         print *, "hzllllll, after hist_write_time"
          if (p_is_worker) then
             if (numpatch > 0) then
                allocate (filter  (numpatch))
@@ -278,6 +280,8 @@ contains
             ENDIF
          ENDIF
 
+         print *, "hzlllllll, begin write history"
+
          ! wind in eastward direction [m/s]
          call write_history_variable_2d ( DEF_hist_vars%xy_us, &
             a_us, file_hist, 'f_xy_us', itime_in_file, sumarea, filter, &
@@ -329,17 +333,18 @@ contains
             'rain','mm/s')
 
          ! snow [mm/s]
+         write(*,*)'xy_snow',DEF_hist_vars%xy_snow, a_snow
          call write_history_variable_2d ( DEF_hist_vars%xy_snow, &
             a_snow, file_hist, 'f_xy_snow', itime_in_file, sumarea, filter, &
             'snow','mm/s')
-
+         write(*,*)'end xy_snow'
          if (DEF_USE_CBL_HEIGHT) then
          ! atmospheric boundary layer height [m]
            call write_history_variable_2d ( DEF_hist_vars%xy_hpbl, &
               a_hpbl, file_hist, 'f_xy_hpbl', itime_in_file, sumarea, filter, &
               'boundary layer height','m')
          endif
-
+         write(*,*)'end part1'
          ! ------------------------------------------------------------------------------------------
          ! Mapping the fluxes and state variables at patch [numpatch] to grid
          ! ------------------------------------------------------------------------------------------
@@ -361,109 +366,118 @@ contains
          ENDIF
 
          ! wind stress: E-W [kg/m/s2]
+         write(*,*)'start part2'
          call write_history_variable_2d ( DEF_hist_vars%taux, &
             a_taux, file_hist, 'f_taux', itime_in_file, sumarea, filter, &
             'wind stress: E-W','kg/m/s2')
-
+         write(*,*)'end f_taux'
          ! wind stress: N-S [kg/m/s2]
          call write_history_variable_2d ( DEF_hist_vars%tauy, &
             a_tauy, file_hist, 'f_tauy', itime_in_file, sumarea, filter, &
             'wind stress: N-S','kg/m/s2')
+         write(*,*)'end f_tauy'
 
          ! sensible heat from canopy height to atmosphere [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%fsena, &
             a_fsena, file_hist, 'f_fsena', itime_in_file, sumarea, filter, &
             'sensible heat from canopy height to atmosphere','W/m2')
+         write(*,*)'end f_fsena'
 
          ! latent heat flux from canopy height to atmosphere [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%lfevpa, &
             a_lfevpa, file_hist, 'f_lfevpa', itime_in_file, sumarea, filter, &
             'latent heat flux from canopy height to atmosphere','W/m2')
+         write(*,*)'end f_lfevpa'
 
          ! evapotranspiration from canopy to atmosphere [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%fevpa, &
             a_fevpa, file_hist, 'f_fevpa', itime_in_file, sumarea, filter, &
             'evapotranspiration from canopy height to atmosphere','mm/s')
+         write(*,*)'end f_fevpa'
 
          ! sensible heat from leaves [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%fsenl, &
             a_fsenl, file_hist, 'f_fsenl', itime_in_file, sumarea, filter, &
             'sensible heat from leaves','W/m2')
+         write(*,*)'end f_fsenl'
 
          ! evaporation+transpiration from leaves [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%fevpl, &
             a_fevpl, file_hist, 'f_fevpl', itime_in_file, sumarea, filter, &
             'evaporation+transpiration from leaves','mm/s')
+         write(*,*)'end f_fevpl'
 
          ! transpiration rate [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%etr, &
             a_etr, file_hist, 'f_etr', itime_in_file, sumarea, filter, &
             'transpiration rate','mm/s')
+         write(*,*)'end f_etr'
 
          ! sensible heat flux from ground [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%fseng, &
             a_fseng, file_hist, 'f_fseng', itime_in_file, sumarea, filter, &
             'sensible heat flux from ground','W/m2')
-
+         write(*,*)'end f_fseng'
          ! evaporation heat flux from ground [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%fevpg, &
             a_fevpg, file_hist, 'f_fevpg', itime_in_file, sumarea, filter, &
             'evaporation heat flux from ground','mm/s')
-
+         write(*,*)'end f_fevpg'
          ! ground heat flux [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%fgrnd, &
             a_fgrnd, file_hist, 'f_fgrnd', itime_in_file, sumarea, filter, &
             'ground heat flux','W/m2')
-
+         write(*,*)'end f_fgrnd'
          ! solar absorbed by sunlit canopy [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%sabvsun, &
             a_sabvsun, file_hist, 'f_sabvsun', itime_in_file, sumarea, filter, &
             'solar absorbed by sunlit canopy','W/m2')
-
+         write(*,*)'end f_sabvsun'
          ! solar absorbed by shaded [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%sabvsha, &
             a_sabvsha, file_hist, 'f_sabvsha', itime_in_file, sumarea, filter, &
             'solar absorbed by shaded','W/m2')
-
+         write(*,*)'end f_sabvsha'
          ! solar absorbed by ground  [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%sabg, &
             a_sabg, file_hist, 'f_sabg', itime_in_file, sumarea, filter, &
             'solar absorbed by ground','W/m2')
-
+         write(*,*)'end f_sabg'
          ! outgoing long-wave radiation from ground+canopy [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%olrg, &
             a_olrg, file_hist, 'f_olrg', itime_in_file, sumarea, filter, &
             'outgoing long-wave radiation from ground+canopy','W/m2')
-
+         write(*,*)'end f_olrg'
          ! net radiation [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%rnet, &
             a_rnet, file_hist, 'f_rnet', itime_in_file, sumarea, filter, &
             'net radiation','W/m2')
-
+         write(*,*)'end f_rnet'
          ! the error of water banace [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%xerr, &
             a_xerr, file_hist, 'f_xerr', itime_in_file, sumarea, filter, &
             'the error of water banace','mm/s')
-
+         write(*,*)'end f_xerr'
          ! the error of energy balance [W/m2]
          call write_history_variable_2d ( DEF_hist_vars%zerr, &
             a_zerr, file_hist, 'f_zerr', itime_in_file, sumarea, filter, &
             'the error of energy balance','W/m2')
-
+         write(*,*)'end f_zerr'
          ! surface runoff [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%rsur, &
             a_rsur, file_hist, 'f_rsur', itime_in_file, sumarea, filter, &
             'surface runoff','mm/s')
-
+         write(*,*)'end f_rsur'
          ! subsurface runoff [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%rsub, &
             a_rsub, file_hist, 'f_rsub', itime_in_file, sumarea, filter, &
             'subsurface runoff','mm/s')
-
+         write(*,*)'end f_rsub'
          ! total runoff [mm/s]
          call write_history_variable_2d ( DEF_hist_vars%rnof, &
             a_rnof, file_hist, 'f_rnof', itime_in_file, sumarea, filter, &
             'total runoff','mm/s')
+         write(*,*)'end f_rnof'
 
 #ifdef LATERAL_FLOW
          ! rate of surface water depth change [mm/s]
@@ -3358,6 +3372,30 @@ contains
             call mp2g_hist%map (VecOnes, sumarea, spv = spval, msk = filter)
          ENDIF
 
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_direct_vis, &
+         a_lakealb_direct_vis, file_hist, 'f_lakealb_direct_vis', itime_in_file, sumarea, filter, &
+         'lake direct albedo vis','%')
+
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_direct_nir, &
+         a_lakealb_direct_nir, file_hist, 'f_lakealb_direct_nir', itime_in_file, sumarea, filter, &
+         'lake direct albedo nir','%')
+
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_direct_shortwave, &
+         a_lakealb_direct_shortwave, file_hist, 'f_lakealb_direct_shortwave', itime_in_file, sumarea, filter, &
+         'lake direct albedo shortwave','%')
+
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_diffuse_vis, &
+         a_lakealb_diffuse_vis, file_hist, 'f_lakealb_diffuse_vis', itime_in_file, sumarea, filter, &
+         'lake diffuse albedo vis','%')
+
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_diffuse_nir, &
+         a_lakealb_diffuse_nir, file_hist, 'f_lakealb_diffuse_nir', itime_in_file, sumarea, filter, &
+         'lake diffuse albedo nir','%')
+
+         call write_history_variable_2d ( DEF_hist_vars%lakealb_diffuse_shortwave, &
+         a_lakealb_diffuse_shortwave, file_hist, 'f_lakealb_diffuse_shortwave', itime_in_file, sumarea, filter, &
+         'lake diffuse albedo shortwave','%')
+
          ! lake temperature [K]
          call write_history_variable_3d ( DEF_hist_vars%t_lake, &
             a_t_lake, file_hist, 'f_t_lake', itime_in_file, 'lake', 1, nl_lake, sumarea, filter, &
@@ -3807,6 +3845,7 @@ contains
 #endif
 #ifdef SinglePoint
       case ('Single')
+         print *, "hzlllll, before hist_single_write_time"
          CALL hist_single_write_time  (filename, dataname, time, itime)
 #endif
       end select

@@ -19,20 +19,210 @@ MODULE MOD_Lake
 !-----------------------------------------------------------------------
 
  use MOD_Precision
+ USE MOD_Vars_Global, only: maxsnl
+ USE MOD_SPMD_Task
  IMPLICIT NONE
- SAVE
+!  SAVE
+ real(R8),parameter :: SHR_CONST_PI     = 3.14159265358979323846_R8
+ real(R8),parameter :: SHR_CONST_RHOICE = 0.917e3_R8           !  density of ice (kg/m^3)
 
+ integer, parameter :: iulog = 6                               ! "stdout" log file unit number, default is 6
+ integer, parameter :: numrad  = 2                             !  number of solar radiation bands: vis, nir
+
+ logical, parameter :: use_extrasnowlayers = .false.
+ character(len=256), parameter :: snow_shape = 'sphere'  
+ logical, parameter :: use_dust_snow_internal_mixing = .false.
+ character(len=256), parameter :: snicar_atm_type = 'mid-latitude_winter' 
 ! PUBLIC MEMBER FUNCTIONS:
   public :: newsnow_lake
   public :: laketem
   public :: snowwater_lake
+  public :: LakeOptics_init
 
 
 ! PRIVATE MEMBER FUNCTIONS:
   private :: roughness_lake
   private :: hConductivity_lake
 
+  ! !PUBLIC DATA MEMBERS:
+  integer,  public, parameter :: sno_nbr_aer = 8         ! number of aerosol species in snowpack
+                                                         ! (indices described above) [nbr]
+  logical,  public, parameter :: DO_SNO_OC   = .true.   ! parameter to include organic carbon (OC)
+                                                         ! in snowpack radiative calculations
+  logical,  public, parameter :: DO_SNO_AER  = .true.    ! parameter to include aerosols in snowpack radiative calculations
+  ! !PRIVATE DATA MEMBERS:
+  integer,  parameter :: numrad_snw     = 5              ! number of spectral bands used in snow model [nbr]
+  integer,  parameter :: nir_bnd_bgn    = 2              ! first band index in near-IR spectrum [idx]
+  integer,  parameter :: nir_bnd_end    = 5              ! ending near-IR band index [idx]
+  integer,  parameter :: idx_Mie_snw_mx = 1471           ! number of effective radius indices used in Mie lookup table [idx]
+  integer,  parameter :: idx_T_max      = 11             ! maxiumum temperature index used in aging lookup table [idx]
+  integer,  parameter :: idx_T_min      = 1              ! minimum temperature index used in aging lookup table [idx]
+  integer,  parameter :: idx_Tgrd_max   = 31             ! maxiumum temperature gradient index used in aging lookup table [idx]
+  integer,  parameter :: idx_Tgrd_min   = 1              ! minimum temperature gradient index used in aging lookup table [idx]
+  integer,  parameter :: idx_rhos_max   = 8              ! maxiumum snow density index used in aging lookup table [idx]
+  integer,  parameter :: idx_rhos_min   = 1              ! minimum snow density index used in aging lookup table [idx]
 
+#ifdef MODAL_AER
+  ! NOTE: right now the macro 'MODAL_AER' is not defined anywhere, i.e.,
+  ! the below (modal aerosol scheme) is not available and can not be
+  ! active either. It depends on the specific input aerosol deposition
+  ! data which is suitable for modal scheme. [06/15/2023, Hua Yuan]
+  !mgf++
+  integer,  parameter :: idx_bc_nclrds_min     = 1       ! minimum index for BC particle size in optics lookup table
+  integer,  parameter :: idx_bc_nclrds_max     = 10      ! maximum index for BC particle size in optics lookup table
+  integer,  parameter :: idx_bcint_icerds_min  = 1       ! minimum index for snow grain size in optics lookup table for within-ice BC
+  integer,  parameter :: idx_bcint_icerds_max  = 8       ! maximum index for snow grain size in optics lookup table for within-ice BC
+  !mgf--
+#endif
+
+  integer,  parameter :: snw_rds_max_tbl = 1500          ! maximum effective radius defined in Mie lookup table [microns]
+  integer,  parameter :: snw_rds_min_tbl = 30            ! minimium effective radius defined in Mie lookup table [microns]
+  real(r8), parameter :: snw_rds_max     = 1500._r8      ! maximum allowed snow effective radius [microns]
+  real(r8), parameter :: snw_rds_min     = 54.526_r8     ! minimum allowed snow effective radius (also "fresh snow" value) [microns
+  real(r8), parameter :: snw_rds_refrz   = 1000._r8      ! effective radius of re-frozen snow [microns]
+  real(r8), parameter :: min_snw = 1.0E-30_r8            ! minimum snow mass required for SNICAR RT calculation [kg m-2]
+  !real(r8), parameter :: C1_liq_Brun89  = 1.28E-17_r8   ! constant for liquid water grain growth [m3 s-1],
+                                                         ! from Brun89
+  real(r8), parameter :: C1_liq_Brun89   = 0._r8         ! constant for liquid water grain growth [m3 s-1],
+                                                         ! from Brun89: zeroed to accomodate dry snow aging
+  real(r8), parameter :: C2_liq_Brun89   = 4.22E-13_r8   ! constant for liquid water grain growth [m3 s-1],
+                                                         ! from Brun89: corrected for LWC in units of percent
+
+  real(r8), parameter :: tim_cns_bc_rmv  = 2.2E-8_r8     ! time constant for removal of BC in snow on sea-ice
+                                                         ! [s-1] (50% mass removal/year)
+  real(r8), parameter :: tim_cns_oc_rmv  = 2.2E-8_r8     ! time constant for removal of OC in snow on sea-ice
+                                                         ! [s-1] (50% mass removal/year)
+  real(r8), parameter :: tim_cns_dst_rmv = 2.2E-8_r8     ! time constant for removal of dust in snow on sea-ice
+                                                         ! [s-1] (50% mass removal/year)
+  !$acc declare copyin(C1_liq_Brun89, C2_liq_Brun89, &
+  !$acc tim_cns_bc_rmv, tim_cns_oc_rmv, tim_cns_dst_rmv)
+
+  ! scaling of the snow aging rate (tuning option):
+  logical :: flg_snoage_scl    = .false.                 ! flag for scaling the snow aging rate by some arbitrary factor
+  real(r8), parameter :: xdrdt = 1.0_r8                  ! arbitrary factor applied to snow aging rate
+  ! snow and aerosol Mie parameters:
+  ! (arrays declared here, but are set in iniTimeConst)
+  ! (idx_Mie_snw_mx is number of snow radii with defined parameters (i.e. from 30um to 1500um))
+
+  ! direct-beam weighted ice optical properties
+  real(r8), allocatable :: ice_density     (:) 
+  real(r8), allocatable :: air_bubble     (:) 
+  real(r8), allocatable :: bc     (:) 
+  real(r8), allocatable :: sca_cff     (:) 
+  real(r8), allocatable :: refindx_im_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: refindx_re_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: refindxwat_im_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: refindxwat_re_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: ss_alb_snw_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: asm_prm_snw_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: ext_cff_mss_snw_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: sca_cff_vlm_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: asm_prm_ice_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: abs_cff_mss_avg_clr     (:,:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: ss_alb_wtr_avg_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: ext_cff_mss_wtr_avg_clr     (:,:) ! (numrad_snw,90);
+  real(r8), allocatable :: refindx_im_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: refindx_re_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: refindxwat_im_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: refindxwat_re_cld    (:) ! (numrad_snw);
+  real(r8), allocatable :: ss_alb_snw_avg     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_snw_avg     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_snw_avg     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: sca_cff_vlm_avg    (:,:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_ice_avg     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: abs_cff_mss_avg     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: sca_cff_wtr_avg_clr     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: FL_r_dif_a_clr     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: FL_r_dif_b_clr     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: flx_slr     (:,:) ! (numrad_snw);
+  real(r8), allocatable :: ss_alb_wtr_avg_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_wtr_avg_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: sca_cff_wtr_avg_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: FL_r_dif_a_cld     (:) ! (numrad_snw);
+  real(r8), allocatable :: FL_r_dif_b_cld     (:) ! (numrad_snw);
+
+  ! direct & diffuse flux
+  real(r8), allocatable :: flx_wgt_dir (:,:,:) ! (6, 90, numrad_snw) ! direct flux, six atmospheric types, 0-89 SZA
+  real(r8), allocatable :: flx_wgt_dif (:,:)   ! (6, numrad_snw)     ! diffuse flux, six atmospheric types
+
+  ! snow grain shape
+  integer, parameter :: snow_shape_sphere            = 1
+  integer, parameter :: snow_shape_spheroid          = 2
+  integer, parameter :: snow_shape_hexagonal_plate   = 3
+  integer, parameter :: snow_shape_koch_snowflake    = 4
+
+  ! atmospheric condition for SNICAR-AD
+  integer, parameter :: atm_type_default             = 0
+  integer, parameter :: atm_type_mid_latitude_winter = 1
+  integer, parameter :: atm_type_mid_latitude_summer = 2
+  integer, parameter :: atm_type_sub_Arctic_winter   = 3
+  integer, parameter :: atm_type_sub_Arctic_summer   = 4
+  integer, parameter :: atm_type_summit_Greenland    = 5
+  integer, parameter :: atm_type_high_mountain       = 6
+
+#ifdef MODAL_AER
+  !mgf++
+  ! Size-dependent BC optical properties. Currently a fixed BC size is
+  ! assumed, but this framework enables optical properties to be
+  ! assigned based on the BC effective radius, should this be
+  ! implemented in the future.
+  !
+  ! within-ice BC (i.e., BC that was deposited within hydrometeors)
+  real(r8), allocatable :: ss_alb_bc1     (:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+  real(r8), allocatable :: asm_prm_bc1    (:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+  real(r8), allocatable :: ext_cff_mss_bc1(:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+
+  ! external BC
+  real(r8), allocatable :: ss_alb_bc2     (:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+  real(r8), allocatable :: asm_prm_bc2    (:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+  real(r8), allocatable :: ext_cff_mss_bc2(:,:)  ! (numrad_snw,idx_bc_nclrds_max);
+  !mgf--
+#else
+  ! hydrophiliic BC
+  real(r8), allocatable :: ss_alb_bc1     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_bc1    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_bc1(:) ! (numrad_snw);
+
+  ! hydrophobic BC
+  real(r8), allocatable :: ss_alb_bc2     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_bc2    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_bc2(:) ! (numrad_snw);
+#endif
+
+  ! hydrophobic OC
+  real(r8), allocatable :: ss_alb_oc1     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_oc1    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_oc1(:) ! (numrad_snw);
+
+  ! hydrophilic OC
+  real(r8), allocatable :: ss_alb_oc2     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_oc2    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_oc2(:) ! (numrad_snw);
+
+  ! dust species 1:
+  real(r8), allocatable :: ss_alb_dst1     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_dst1    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_dst1(:) ! (numrad_snw);
+
+  ! dust species 2:
+  real(r8), allocatable :: ss_alb_dst2     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_dst2    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_dst2(:) ! (numrad_snw);
+
+  ! dust species 3:
+  real(r8), allocatable :: ss_alb_dst3     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_dst3    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_dst3(:) ! (numrad_snw);
+
+  ! dust species 4:
+  real(r8), allocatable :: ss_alb_dst4     (:) ! (numrad_snw);
+  real(r8), allocatable :: asm_prm_dst4    (:) ! (numrad_snw);
+  real(r8), allocatable :: ext_cff_mss_dst4(:) ! (numrad_snw);
+
+#ifdef MODAL_AER
+  ! Absorption enhancement factors for within-ice BC
+  real(r8), allocatable :: bcenh (:,:,:) ! (numrad_snw,idx_bc_nclrds_max,idx_bcint_icerds_max);
+#endif
 !-----------------------------------------------------------------------
 
   CONTAINS
@@ -173,7 +363,7 @@ MODULE MOD_Lake
                       t_lake(1)=(cpliq*pg_rain*deltim*t_precip+cpliq*denh2o*dz_lake(1)*tfrz-d)/&
                                 (cpliq*denh2o*dz_lake(1)+cpliq*pg_rain*deltim)
                       lake_icefrac(1) = 0.0
-                  else
+                   else
                       t_lake(1)=tfrz
                       wice_lake(1) = denh2o*dz_lake(1)*lake_icefrac(1) - a/hfus
                       wliq_lake(1) = denh2o*dz_lake(1)*(1-lake_icefrac(1)) + a/hfus
@@ -272,6 +462,12 @@ MODULE MOD_Lake
            porsl        , csol        , k_solids     , &
            dksatu       , dksatf      , dkdry        , &
            BA_alpha     , BA_beta     , hpbl         , &
+           dlon         , idate       , sabgv        , &
+           sabgvd       , sabgvda     , sabgvdu      , sabgn     ,&
+           sabgnd       , snw_rds,&
+           mss_bcpho    ,mss_bcphi    ,mss_ocpho       ,mss_ocphi       ,&
+           mss_dst1     ,mss_dst2     ,mss_dst3        ,mss_dst4,  &
+           fsno,   scvold,sag,ssi,wimp,pg_rain,pg_snow,forc_aer,fiold,&   
 
            ! "inout" arguments
            ! -------------------
@@ -292,7 +488,9 @@ MODULE MOD_Lake
            trad         , emis        , z0m          , zol       ,&
            rib          , ustar       , qstar        , tstar     ,&
            fm           , fh          , fq           , sm        ,&
-           urban_call)
+           lakealb_direct_vis,  lakealb_diffuse_vis   , &
+           lakealb_direct_nir,  lakealb_diffuse_nir   ,&
+           lakealb_direct_shortwave,lakealb_diffuse_shortwave, urban_call   )
 
 ! ------------------------ code history ---------------------------
 ! purpose: lake temperature and snow on frozen lake
@@ -353,20 +551,28 @@ MODULE MOD_Lake
   use MOD_Const_Physical, only : tfrz,hvap,hfus,hsub,tkwat,tkice,tkair,stefnc,&
                                   vonkar,grav,cpliq,cpice,cpair,denh2o,denice,rgas
   use MOD_FrictionVelocity
-  USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_SNICAR
+  USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_SNICAR, DEF_USE_ORIGINAL, DEF_USE_ONEBANDICE, DEF_USE_TWOBANDICE, DEF_USE_TWOSTREAM
   USE MOD_TurbulenceLEddy
   USE MOD_Qsadv
   USE MOD_SoilThermalParameters
   USE MOD_Utils
-
+  USE MOD_OrbCoszen
+  use MOD_TimeManager
+!   use MOD_Vars_Global, only: maxsnl
+  use MOD_NetCDFSerial
+  USE MOD_Aerosol, only: AerosolMasses
+  use MOD_SoilSnowHydrology
+  use MOD_SnowLayersCombineDivide
   IMPLICIT NONE
 ! ------------------------ input/output variables -----------------
+
   integer, INTENT(in) :: patchtype    ! land patch type (4=deep lake, 5=shallow lake)
   integer, INTENT(in) :: maxsnl       ! maximum number of snow layers
   integer, INTENT(in) :: nl_soil      ! number of soil layers
   integer, INTENT(in) :: nl_lake      ! number of lake layers
-
+  integer, INTENT(in) :: idate(3)      ! next time-step /year/julian day/second in a day/
   real(r8), INTENT(in) :: dlat        ! latitude (radians)
+  real(r8), INTENT(in) :: dlon        ! longtitude (radians)
   real(r8), INTENT(in) :: deltim      ! seconds in a time step (s)
   real(r8), INTENT(in) :: forc_hgt_u  ! observational height of wind [m]
   real(r8), INTENT(in) :: forc_hgt_t  ! observational height of temperature [m]
@@ -383,6 +589,21 @@ MODULE MOD_Lake
   real(r8), INTENT(in) :: forc_solld  ! atm nir diffuse solar rad onto srf [W/m2]
   real(r8), INTENT(in) :: forc_frl    ! atmospheric infrared (longwave) radiation [W/m2]
   real(r8), INTENT(in) :: sabg        ! solar radiation absorbed by ground [W/m2]
+  real(r8), INTENT(in) :: sabgv       ! direct beam vis solar absorbed by ground  [W/m2] 
+  real(r8), INTENT(in) :: sabgvd      ! diffuse beam vis solar absorbed by ground  [W/m2]
+  real(r8), INTENT(in) :: sabgvdu     ! diffuse beam vis solar reflected by ground  [W/m2]
+  real(r8), INTENT(in) :: sabgvda     ! diffuse beam vis solar reflected and absorbed by ground  [W/m2]
+  real(r8), INTENT(in) :: sabgn       ! direct beam nir solar absorbed by ground  [W/m2]
+  real(r8), INTENT(in) :: sabgnd      ! diffuse beam nir solar absorbed by ground  [W/m2] 
+
+  ! ------------------------SNICAR-----------------------------------------
+  integer   :: flg_snw_ice                  ! flag: =1 when called from CLM, =2 when called from CSIM
+  integer  :: flg_slr_in                   ! flag: =1 for direct-beam incident flux,=2 for diffuse incident flux
+!   integer, INTENT(in) :: maxsnl       ! maximum number of snow layers
+  real(r8) , intent(inout)  :: snw_rds        ( maxsnl+1: 0)   ! snow effective radius (col,lyr) [microns, m^-6]
+!   real(r8) , intent(in)  :: albsfc         ( 1:numrad )     ! albedo of surface underlying snow (col,bnd) [frc]
+  real(r8) :: flx_abs        ( maxsnl+1:12 , 1:numrad)! absorbed flux in each layer per unit flux incident (col, lyr, bnd)
+! -----------------------------------------------------------------------  
 
   real(r8), INTENT(in) :: dz_soisno(maxsnl+1:nl_soil) ! soil/snow layer thickness (m)
   real(r8), INTENT(in) :: z_soisno(maxsnl+1:nl_soil)  ! soil/snow node depth [m]
@@ -407,6 +628,15 @@ MODULE MOD_Lake
   real(r8), INTENT(in) :: BA_alpha(1:nl_soil)   ! alpha in Balland and Arp(2005) thermal conductivity scheme
   real(r8), INTENT(in) :: BA_beta(1:nl_soil)    ! beta in Balland and Arp(2005) thermal conductivity scheme
   real(r8), INTENT(in) :: hpbl                  ! atmospheric boundary layer height [m]
+  real(r8), INTENT(in) :: fsno
+  real(r8), INTENT(in) :: scvold
+  real(r8), INTENT(inout) :: sag
+  real(r8), INTENT(in) :: ssi                ! irreducible water saturation of snow
+  real(r8), INTENT(in) :: wimp               ! water impremeable if porosity less than wimp
+  real(r8), INTENT(in) :: pg_rain            ! rainfall incident on ground [mm/s]
+  real(r8), INTENT(in) :: pg_snow            ! snowfall incident on ground [mm/s]
+  real(r8), intent(in) :: forc_aer ( 14 )
+  real(r8), INTENT(in) :: fiold(maxsnl+1:0)  ! fraction of ice relative to the total water content at the previous time step
 
   real(r8), INTENT(inout) :: t_grnd             ! surface temperature (kelvin)
   real(r8), INTENT(inout) :: scv                ! snow water equivalent [mm]
@@ -458,6 +688,12 @@ MODULE MOD_Lake
   real(r8), INTENT(out) :: fh     ! integral of profile function for heat
   real(r8), INTENT(out) :: fq     ! integral of profile function for moisture
   real(r8), INTENT(out) :: sm     ! rate of snowmelt [mm/s, kg/(m2 s)]
+  real(r8), INTENT(out) :: lakealb_direct_vis
+  real(r8), INTENT(out) :: lakealb_direct_nir
+  real(r8), INTENT(out) :: lakealb_direct_shortwave
+  real(r8), INTENT(out) :: lakealb_diffuse_vis
+  real(r8), INTENT(out) :: lakealb_diffuse_nir
+  real(r8), INTENT(out) :: lakealb_diffuse_shortwave
   logical, optional, intent(in) :: urban_call   ! whether it is a urban CALL
 
 ! ---------------- local variables in surface temp and fluxes calculation -----------------
@@ -544,7 +780,7 @@ MODULE MOD_Lake
   !--------------------
   real(r8) rhow(nl_lake) ! density of water (kg/m**3)
   real(r8) fin           ! heat flux into lake - flux out of lake (w/m**2)
-  real(r8) phi(nl_lake)  ! solar radiation absorbed by layer (w/m**2)
+  real(r8) phi(maxsnl+1:nl_lake)  ! solar radiation absorbed by layer (w/m**2)
   real(r8) phi_soil      ! solar radiation into top soil layer (W/m^2)
   real(r8) phidum        ! temporary value of phi
 
@@ -577,21 +813,454 @@ MODULE MOD_Lake
   real(r8) brr    (maxsnl+1:nl_lake+nl_soil) !
   integer  imelt_x(maxsnl+1:nl_lake+nl_soil) ! flag for melting (=1), freezing (=2), Not=0 (new)
 
+  real(r8) wice_soisno_snicar(maxsnl+1:nl_soil)
+  real(r8) wliq_soisno_snicar(maxsnl+1:nl_soil)
+  real(r8) dz_soisno_snicar(maxsnl+1:nl_soil)
+  real(r8) z_soisno_snicar(maxsnl+1:nl_soil)
+  real(r8) zi_soisno_snicar(maxsnl:nl_soil)
+  real(r8) t_soisno_snicar(maxsnl+1:nl_soil)
+  integer snl_snicar
+  integer lb_snicar
+  real(r8) scv_snicar
+  real(r8) snowdp_snicar
+  real(r8) qout_snowb
   real(r8) dzm       ! used in computing tridiagonal matrix [m]
   real(r8) dzp       ! used in computing tridiagonal matrix [m]
   real(r8) zin       ! depth at top of layer (m)
   real(r8) zout      ! depth at bottom of layer (m)
+  real(r8) rsfinv    ! relative flux of ice visible solar radiation into layer
+  real(r8) rsfoutv   ! relative flux of ice visible solar radiation out of layer
+  real(r8) rsfinn    ! relative flux of ice near-infrared solar radiation into layer
+  real(r8) rsfoutn   ! relative flux of ice near-infrared solar radiation out of layer
   real(r8) rsfin     ! relative flux of solar radiation into layer
   real(r8) rsfout    ! relative flux of solar radiation out of layer
   real(r8) eta       ! light extinction coefficient (/m): depends on lake type
+  real(r8) etaiv     ! light extinction coefficient (/m): for ice,visible
+  real(r8) etain     ! light extinction coefficient (/m): for ice,near-infrared
+  real(r8) etav 
+  real(r8) etan 
+  real(r8) rsfinvw 
+  real(r8) rsfinnw   
+  real(r8) rsfoutvw 
+  real(r8) rsfoutnw 
+  real(r8) etatsa(nl_lake)       ! light extinction coefficient (/m): depends on lake type
+  real(r8) topc 
+  real(r8) daT  
+  real(r8) rou 
+  real(r8) D 
+  real(r8) w0
+  real(r8) uavg 
+  real(r8) phi_srf_sum 
+  real(r8) sum
+  real(r8) dtao(nl_lake)
+  real(r8) tao(nl_lake+1)
+  real(r8) eup(nl_lake+1)
+  real(r8) eupd(nl_lake+1)
+  real(r8) eupz(nl_lake+1)
+  real(r8) ssk
+  real(r8) ssh
+  real(r8) edown(nl_lake)
+!   real(r8) g         !asymmetry factor
+  real(r8) f
+  real(r8) s1
+  real(r8) s2 
+  real(r8) k 
+  real(r8) ssa 
+  real(r8) z1
+  real(r8) z2
+  real(r8) saa
+  real(r8) sbe
+  real(r8) se
+  real(r8) sr
+  real(r8) su
+  real(r8) sv
+  real(r8) se2
+  real(r8) sr2
+  real(r8) su2
+  real(r8) sv2
+  real(r8) k2
+  real(r8) sk2
+  real(r8) sh2
+!   real(r8) r1
+!   real(r8) r2
+  real(r8) r3
+  real(r8) tu
+  real(r8) ttu
+  real(r8) coszen
+  real(r8) czen
+  real(r8) calday
+  real(r8) sum2
   real(r8) za(2)     ! base of surface absorption layer (m): depends on lake type
+  !-----------------SNICAR--------------------------------------------
+  integer :: snl_lcl                                   ! negative number of snow layers [nbr]
+  integer :: snw_rds_lcl(maxsnl+1:11)                   ! snow effective radius [m^-6]
+  integer :: snw_rds_idx(maxsnl+1:11)
+  integer:: srf_lyr
+  real(r8):: dif_a(1:numrad_snw)                      ! +CAW
+  real(r8):: dif_b(1:numrad_snw)                      ! +CAW
+  real(r8):: flx_abs_btm(1:numrad_snw)
+  real(r8):: critical_angle
+  real(r8):: phifsum
+  real(r8):: phi_soilfsum
+  real(r8):: phi_srf
+  real(r8):: phisum
+  real(r8):: srf_prop
+  real(r8):: mss_cnc_aer_ice_in
+  real(r8)::phi_down
+  real(r8) :: dziw(1:11)     !(1:nbr_lyr) The thickness of the ice and water layers
+  real(r8) :: ziw (1:11)
+  real(r8) :: rho_snw(1:11)
+  real(r8) :: phi_up
+  real(r8):: phif(2,maxsnl+1:nl_lake)
+  real(r8):: phiup(maxsnl+1:0)
+  real(r8):: phidn(2,1:numrad_snw)
+  real(r8):: flx_abs_dn_lcl(1:numrad_snw)
+  real(r8):: flx_abs_dn1_lcl(1:numrad_snw)
+  real(r8):: flx_abs_up_lcl(1:numrad_snw)
+  real(r8):: flx_abs_dn(1:numrad)
+  real(r8):: flx_abs_dn1(1:numrad)
+  real(r8):: flx_abs_up(1:numrad)
+  real(r8):: flx_abs_dnd(1:numrad)
+  real(r8):: flx_abs_dnd1(1:numrad)
+  real(r8):: flx_abs_upd(1:numrad)
+  real(r8):: flx_abs_dni(1:numrad)
+  real(r8):: flx_abs_dni1(1:numrad)
+  real(r8):: flx_abs_upi(1:numrad)
+  real(r8):: flx_absi(maxsnl+1:12,1:numrad)
+  real(r8):: flx_absd(maxsnl+1:12,1:numrad)
+  real(r8):: phi_soilf(2)
+  real(r8):: flx_slrd_lcl(1:numrad_snw)                ! direct beam incident irradiance [W/m2] (set to 1)
+  real(r8):: flx_slri_lcl(1:numrad_snw)                ! diffuse incident irradiance [W/m2] (set to 1)
+  real(r8):: mss_cnc_aer_lcl(maxsnl+1:11,1:sno_nbr_aer) ! aerosol mass concentration (lyr,aer_nbr) [kg/kg]
+  real(r8):: h2osno_lcl                                ! total column snow mass [kg/m2]
+  real(r8):: h2osno_liq_lcl(maxsnl+1:11)                ! liquid water mass [kg/m2]
+  real(r8):: h2osno_ice_lcl(maxsnl+1:11)                ! ice mass [kg/m2]
+  real(r8):: albsfc_lcl(1:numrad_snw)                  ! albedo of underlying surface [frc]
+  real(r8):: ss_alb_snw_lcl(maxsnl+1:11)                ! single-scatter albedo of ice grains (lyr) [frc]
+  real(r8):: asm_prm_snw_lcl(maxsnl+1:11)               ! asymmetry parameter of ice grains (lyr) [frc]
+  real(r8):: ext_cff_mss_snw_lcl(maxsnl+1:11)           ! mass extinction coefficient of ice grains (lyr) [m2/kg]
+  real(r8):: ss_alb_aer_lcl(sno_nbr_aer)               ! single-scatter albedo of aerosol species (aer_nbr) [frc]
+  real(r8):: asm_prm_aer_lcl(sno_nbr_aer)              ! asymmetry parameter of aerosol species (aer_nbr) [frc]
+  real(r8):: ext_cff_mss_aer_lcl(sno_nbr_aer)          ! mass extinction coefficient of aerosol species (aer_nbr) [m2/kg]
+  real(r8) :: rds_bcint_lcl(maxsnl+1:11)       ! effective radius of within-ice BC [nm]
+  real(r8) :: rds_bcext_lcl(maxsnl+1:11)       ! effective radius of external BC [nm]
+  ! Other local variables
+  integer :: DELTA                               ! flag to use Delta approximation (Joseph, 1976)
+                                                 ! (1= use, 0= don't use)
+  real(r8):: flx_wgt(1:numrad_snw)               ! weights applied to spectral bands,
+                                                 ! specific to direct and diffuse cases (bnd) [frc]
+  integer :: flg_nosnl                           ! flag: =1 if there is snow, but zero snow layers,
+                                                 ! =0 if at least 1 snow layer [flg]
+                                                 ! integer :: trip                                                                          ! flag: =1 to redo RT calculation if result is unrealistic
+                                                 ! integer :: flg_dover  
+  real(r8):: albedo                              ! temporary snow albedo [frc]
+  real(r8):: albout         ( 1:numrad ) 
+  real(r8):: flx_sum                             ! temporary summation variable for NIR weighting
+  real(r8):: albout_lcl(numrad_snw)              ! snow albedo by band [frc]
+  real(r8):: flx_abs_lcl(maxsnl+1:12,numrad_snw)  ! absorbed flux per unit incident flux at top of snowpack (lyr,bnd) [frc]
+  real(r8):: flx_sum2(maxsnl+1:12)
+  real(r8):: L_snw(maxsnl+1:11)                   ! h2o mass (liquid+solid) in snow layer (lyr) [kg/m2]
+  real(r8):: tau_snw(maxsnl+1:11)                 ! snow optical depth (lyr) [unitless]
+  real(r8):: L_aer(maxsnl+1:11,sno_nbr_aer)       ! aerosol mass in snow layer (lyr,nbr_aer) [kg/m2]
+  real(r8):: tau_aer(maxsnl+1:11,sno_nbr_aer)     ! aerosol optical depth (lyr,nbr_aer) [unitless]
+  real(r8):: tau_sum                              ! cumulative (snow+aerosol) optical depth [unitless]
+  real(r8):: tau_elm(maxsnl+1:11)                 ! column optical depth from layer bottom to snowpack top (lyr) [unitless]
+  real(r8):: omega_sum                            ! temporary summation of single-scatter albedo of all aerosols [frc]
+  real(r8):: g_sum                                ! temporary summation of asymmetry parameter of all aerosols [frc]
+
+  real(r8):: tau(maxsnl+1:11)                     ! weighted optical depth of snow+aerosol layer (lyr) [unitless]
+  real(r8):: omega(maxsnl+1:11)                   ! weighted single-scatter albedo of snow+aerosol layer (lyr) [frc]
+  real(r8):: g(maxsnl+1:11)                       ! weighted asymmetry parameter of snow+aerosol layer (lyr) [frc]
+  real(r8):: tau_star(maxsnl+1:11)                ! transformed (i.e. Delta-Eddington) optical depth of snow+aerosol layer
+                                                  ! (lyr) [unitless]
+  real(r8):: omega_star(maxsnl+1:11)              ! transformed (i.e. Delta-Eddington) SSA of snow+aerosol layer (lyr) [frc]
+  real(r8):: g_star(maxsnl+1:11)                  ! transformed (i.e. Delta-Eddington) asymmetry paramater of snow+aerosol layer
+                                                  ! (lyr) [frc]    
+  integer :: bnd_idx                             ! spectral band index (1 <= bnd_idx <= numrad_snw) [idx]
+  integer :: rds_idx                             ! snow effective radius index for retrieving
+  integer :: snl_btm                             ! index of bottom snow layer (0) [idx]
+  integer :: snl_top                             ! index of top snow layer (-4 to 0) [idx]
+  integer :: fc                                  ! column filter index
+  integer :: m                                   ! secondary layer index [idx]
+  integer :: nint_snw_rds_min                    ! nearest integer value of snw_rds_min
+
+  real(r8):: F_abs(maxsnl+1:11)                   ! net absorbed radiative energy (lyr) [W/m^2]
+  real(r8):: F_abs_sum                           ! total absorbed energy in column [W/m^2]
+  real(r8):: F_sfc_pls                           ! upward radiative flux at snowpack top [W/m^2]
+  real(r8):: F_btm_net                           ! net flux at bottom of snowpack [W/m^2]
+  real(r8):: energy_sum                          ! sum of all energy terms; should be 0.0 [W/m^2]
+  real(r8):: mu_not                              ! cosine of solar zenith angle (used locally) [frc]
+
+  integer :: err_idx                             ! counter for number of times through error loop [nbr]
+  real(r8):: pi                                  ! 3.1415...
+  integer :: snw_shp_lcl(maxsnl+1:0)             ! Snow grain shape option:
+                                                 ! 1=sphere; 2=spheroid; 3=hexagonal plate; 4=koch snowflake
+  real(r8):: snw_fs_lcl(maxsnl+1:0)              ! Shape factor: ratio of nonspherical grain effective radii to that of equal-volume sphere
+                                                 ! 0=use recommended default value
+                                                 ! others(0<fs<1)= use user-specified value
+                                                 ! only activated when sno_shp > 1 (i.e. nonspherical)
+  real(r8):: snw_ar_lcl(maxsnl+1:0)              ! % Aspect ratio: ratio of grain width to length
+                                                 ! 0=use recommended default value
+                                                 ! others(0.1<fs<20)= use user-specified value
+                                                 ! only activated when sno_shp > 1 (i.e. nonspherical) 
+
+     real(r8):: &
+         diam_ice           , & ! effective snow grain diameter
+         fs_sphd            , & ! shape factor for spheroid
+         fs_hex0            , & ! shape factor for hexagonal plate
+         fs_hex             , & ! shape factor for hexagonal plate (reference)
+         fs_koch            , & ! shape factor for koch snowflake
+         AR_tmp             , & ! aspect ratio for spheroid
+         g_ice_Cg_tmp(7)    , & ! temporary for calculation of asymetry factor
+         gg_ice_F07_tmp(7)  , & ! temporary for calculation of asymetry factor
+         g_ice_F07          , & ! temporary for calculation of asymetry factor
+         g_ice              , & ! asymmetry factor
+         gg_F07_intp        , & ! temporary for calculation of asymetry factor (interpolated)
+         g_Cg_intp          , & ! temporary for calculation of asymetry factor  (interpolated)
+         R_1_omega_tmp      , & ! temporary for dust-snow mixing calculation
+         C_dust_total           ! dust concentration
+
+     integer :: atm_type_index  ! index for atmospheric type
+     integer :: slr_zen         ! integer value of solar zenith angle
+
+     ! SNICAR_AD new variables, follow sea-ice shortwave conventions
+     real(r8):: &
+        trndir(maxsnl+1:12)  , & ! solar beam down transmission from top
+        trntdr(maxsnl+1:12)  , & ! total transmission to direct beam for layers above
+        trndif(maxsnl+1:12)  , & ! diffuse transmission to diffuse beam for layers above
+        rupdir(maxsnl+1:12)  , & ! reflectivity to direct radiation for layers below
+        rupdif(maxsnl+1:12)  , & ! reflectivity to diffuse radiation for layers below
+        rdndif(maxsnl+1:12)  , & ! reflectivity to diffuse radiation for layers above
+        dfdir(maxsnl+1:12)   , & ! down-up flux at interface due to direct beam at top surface
+        dfdif(maxsnl+1:12)   , & ! down-up flux at interface due to diffuse beam at top surface
+        fdirdn(maxsnl+1:12)   , & 
+        fdirup(maxsnl+1:12)   , &
+        fdifdn(maxsnl+1:12)   , &
+        fdifup(maxsnl+1:12)   , &
+        flx_interface(maxsnl+1:12,numrad), &
+        flx_interface_lcl(maxsnl+1:12,numrad_snw), &
+        flx_interfaced(maxsnl+1:12,numrad), &
+        flx_interfacei(maxsnl+1:12,numrad), &
+        F_up(maxsnl+1:12,numrad_snw)   , &
+        F_dwn(maxsnl+1:12,numrad_snw)   , &
+        F_net(maxsnl+1:12,numrad_snw)   , &
+        dftmp(maxsnl+1:12)       ! temporary variable for down-up flux at interface
+
+     real(r8):: &
+        rdir(maxsnl+1:11)    , & ! layer reflectivity to direct radiation
+        rdif_a(maxsnl+1:11)  , & ! layer reflectivity to diffuse radiation from above
+        rdif_b(maxsnl+1:11)  , & ! layer reflectivity to diffuse radiation from below
+        tdir(maxsnl+1:11)    , & ! layer transmission to direct radiation (solar beam + diffuse)
+        tdif_a(maxsnl+1:11)  , & ! layer transmission to diffuse radiation from above
+        tdif_b(maxsnl+1:11)  , & ! layer transmission to diffuse radiation from below
+        trnlay(maxsnl+1:11)      ! solar beam transm for layer (direct beam only)
+
+
+     real(r8):: &
+         ts       , & ! layer delta-scaled extinction optical depth
+         ws       , & ! layer delta-scaled single scattering albedo
+         gs       , & ! layer delta-scaled asymmetry parameter
+         extins   , & ! extinction
+         alp      , & ! temporary for alpha
+         gam      , & ! temporary for agamm
+         amg      , & ! alp - gam
+         apg      , & ! alp + gam
+         ue       , & ! temporary for u
+         refk     , & ! interface multiple scattering
+         refkp1   , & ! interface multiple scattering for k+1
+         refkm1   , & ! interface multiple scattering for k-1
+         tdrrdir  , & ! direct tran times layer direct ref
+         tdndif       ! total down diffuse = tot tran - direct tran
+
+     real(r8) :: &
+         alpha    , & ! term in direct reflectivity and transmissivity
+         agamm    , & ! term in direct reflectivity and transmissivity
+         el       , & ! term in alpha,agamm,n,u
+         taus     , & ! scaled extinction optical depth
+         omgs     , & ! scaled single particle scattering albedo
+         asys     , & ! scaled asymmetry parameter
+         u        , & ! term in diffuse reflectivity and transmissivity
+         n        , & ! term in diffuse reflectivity and transmissivity
+         lm       , & ! temporary for el
+         mu       , & ! cosine solar zenith for either snow or water
+         ne           ! temporary for n
+
+     ! perpendicular and parallel relative to plane of incidence and scattering
+     real(r8) :: &
+         R1       , & ! perpendicular polarization reflection amplitude
+         R2       , & ! parallel polarization reflection amplitude
+         T1       , & ! perpendicular polarization transmission amplitude
+         T2       , & ! parallel polarization transmission amplitude
+         Rf_dir_a , & ! fresnel reflection to direct radiation
+         Tf_dir_a , & ! fresnel transmission to direct radiation
+         Rf_dif_a , & ! fresnel reflection to diff radiation from above
+         Rf_dif_b , & ! fresnel reflection to diff radiation from below
+         Tf_dif_a , & ! fresnel transmission to diff radiation from above
+         Tf_dif_b     ! fresnel transmission to diff radiation from below
+
+     real(r8) :: &
+         gwt      , & ! gaussian weight
+         swt      , & ! sum of weights
+         trn      , & ! layer transmission
+         rdr      , & ! rdir for gaussian integration
+         tdr      , & ! tdir for gaussian integration
+         smr      , & ! accumulator for rdif gaussian integration
+         smt      , & ! accumulator for tdif gaussian integration
+         exp_min      ! minimum exponential value
+
+     integer :: &
+         ng             , & ! gaussian integration index
+         snl_btm_itf    , & ! index of bottom snow layer interfaces (1) [idx]
+         ngmax = 8          ! gaussian integration index
+
+     ! Gaussian integration angle and coefficients
+     real(r8) :: difgauspt(1:8) , difgauswt(1:8)
+
+     ! constants used in algorithm
+     real(r8) :: &
+         c0      = 0.0_r8     , &
+         c1      = 1.0_r8     , &
+         c2      = 2.0_r8     , &
+         c3      = 3.0_r8     , &
+         c4      = 4.0_r8     , &
+         c6      = 6.0_r8     , &
+         cp01    = 0.01_r8    , &
+         cp5     = 0.5_r8     , &
+         cp75    = 0.75_r8    , &
+         c1p5    = 1.5_r8     , &
+         trmin   = 0.001_r8   , &
+         argmax  = 10.0_r8       ! maximum argument of exponential
+
+     ! cconstant coefficients used for SZA parameterization
+     real(r8) :: &
+         puny   =  1.0e-11_r8  
+
+
+     ! coefficients used for SZA parameterization
+     real(r8) :: &
+         sza_c1          , & ! coefficient, SZA parameteirzation
+         sza_c0          , & ! coefficient, SZA parameterization
+         sza_factor      , & ! factor used to adjust NIR direct albedo
+         flx_sza_adjust  , & ! direct NIR flux adjustment from sza_factor
+         mu0             , &   ! incident solar zenith angle
+         ice_density_wgted
+
+     !-----------------------NEW---------------------------------------------
+     integer :: nbr_lyr      ! Total number of layers of ice and water
+     integer :: nl_ice       ! number of layers of ice
+     integer :: nl_wat       ! number of layers of water
+     integer :: kfrsnl1      ! Fresnel layer between snow and ice
+     integer :: kfrsnl2      ! Fresnel layer between ice and water
+     integer :: kfrsnl3
+     integer :: kfrsnl4
+     integer :: ice_ri       ! ice refractive index dataset
+   
+     real(r8) :: rho_ice        ! Density of ice
+   !   real(r8) :: rho_air        ! Density of air
+     real(r8) :: ziwsum
+     real(r8) :: refindx_re(numrad_snw)   !
+     real(r8) :: refindx_im(numrad_snw)   ! ice refractive index
+     real(r8) :: refindxwat_im(numrad_snw)   !
+     real(r8) :: refindxwat_re(numrad_snw)   ! ice refractive index
+     real(r8) :: FL_r_dif_a(numrad_snw)
+     real(r8) :: FL_r_dif_b(numrad_snw)
+
+   !   real(r8) :: ss_alb_wtr_avg_cld(numrad_snw)   ! ice refractive index
+   ! !   real(r8) :: ss_alb_wtr_avg_clr(numrad_snw,90)   ! ice refractive index
+   ! !   real(r8) :: ext_cff_mss_wtr_avg_clr(numrad_snw,90)   ! ice refractive index
+   !   real(r8) :: ext_cff_mss_wtr_avg_cld(numrad_snw)   ! ice refractive index
+     real(r8) :: temp1          ! transmissivity1
+     real(r8) :: temp2          ! transmissivity2
+     real(r8) :: nreal          ! Adjusted complex refractive index
+     real(r8) :: nreal_wtr          ! Adjusted complex refractive index
+     real(r8) :: nreal_ice          ! Adjusted complex refractive index
+     integer :: iwin           ! The number of layer at ice water interface
+     real(r8) :: mu0n           ! 
+     real(r8) :: rintfc
+     real(r8) :: rfidx_re
+     real(r8) :: rfidx_im
+     real(r8) :: rfidx
+
+
+
+     !-----------------------------------------------------------------------
+#ifdef MODAL_AER
+         !mgf++
+         integer :: idx_bcint_icerds  ! index of ice effective radius for optical properties lookup table
+         integer :: idx_bcint_nclrds  ! index of within-ice BC effective radius for optical properties lookup table
+         integer :: idx_bcext_nclrds  ! index of external BC effective radius for optical properties lookup table
+         real(r8):: enh_fct           ! extinction/absorption enhancement factor for within-ice BC
+         real(r8):: tmp1              ! temporary variable
+         !mgf--
+#endif
+
+      ! Constants for non-spherical ice particles and dust-snow internal mixing
+      real(r8) :: g_b2(7)
+      real(r8) :: g_b1(7)
+      real(r8) :: g_b0(7)
+      real(r8) :: g_F07_c2(7)
+      real(r8) :: g_F07_c1(7)
+      real(r8) :: g_F07_c0(7)
+      real(r8) :: g_F07_p2(7)
+      real(r8) :: g_F07_p1(7)
+      real(r8) :: g_F07_p0(7)
+      real(r8) :: dust_clear_d0(3)
+      real(r8) :: dust_clear_d1(3)
+      real(r8) :: dust_clear_d2(3)
+      real(r8) :: dust_cloudy_d0(3)
+      real(r8) :: dust_cloudy_d1(3)
+      real(r8) :: dust_cloudy_d2(3)
+
+      real(r8), allocatable :: lyr_typ(:)  !(maxsnl+1:nbr_lyr) layer type
+      real(r8) :: sca_cff_vlm_airbbl_lcl(nl_lake)
+      real(r8) :: abs_cff_mss_ice_lcl(nl_lake)
+      real(r8) :: vlm_frac_air(nl_lake)
+
+
+      !!! factors for considering snow grain shape
+      data g_b0(:) / 9.76029E-01_r8, 9.67798E-01_r8, 1.00111E+00_r8, 1.00224E+00_r8,&
+                     9.64295E-01_r8, 9.97475E-01_r8, 9.97475E-01_r8/
+      data g_b1(:) / 5.21042E-01_r8, 4.96181E-01_r8, 1.83711E-01_r8, 1.37082E-01_r8,&
+                     5.50598E-02_r8, 8.48743E-02_r8, 8.48743E-02_r8/
+      data g_b2(:) /-2.66792E-04_r8, 1.14088E-03_r8, 2.37011E-04_r8,-2.35905E-04_r8,&
+                     8.40449E-04_r8,-4.71484E-04_r8,-4.71484E-04_r8/
+
+      data g_F07_c2(:) / 1.349959E-1_r8, 1.115697E-1_r8, 9.853958E-2_r8, 5.557793E-2_r8,&
+                        -1.233493E-1_r8, 0.0_r8, 0.0_r8/
+      data g_F07_c1(:) /-3.987320E-1_r8,-3.723287E-1_r8,-3.924784E-1_r8,-3.259404E-1_r8,&
+                         4.429054E-2_r8,-1.726586E-1_r8,-1.726586E-1_r8/
+      data g_F07_c0(:) / 7.938904E-1_r8, 8.030084E-1_r8, 8.513932E-1_r8, 8.692241E-1_r8,&
+                         7.085850E-1_r8, 6.412701E-1_r8, 6.412701E-1_r8/
+      data g_F07_p2(:) / 3.165543E-3_r8, 2.014810E-3_r8, 1.780838E-3_r8, 6.987734E-4_r8,&
+                        -1.882932E-2_r8,-2.277872E-2_r8,-2.277872E-2_r8/
+      data g_F07_p1(:) / 1.140557E-1_r8, 1.143152E-1_r8, 1.143814E-1_r8, 1.071238E-1_r8,&
+                         1.353873E-1_r8, 1.914431E-1_r8, 1.914431E-1_r8/
+      data g_F07_p0(:) / 5.292852E-1_r8, 5.425909E-1_r8, 5.601598E-1_r8, 6.023407E-1_r8,&
+                         6.473899E-1_r8, 4.634944E-1_r8, 4.634944E-1_r8/
+
+      !!! factors for considring dust-snow internal mixing
+      data dust_clear_d0(:) /1.0413E+00_r8,1.0168E+00_r8,1.0189E+00_r8/
+      data dust_clear_d1(:) /1.0016E+00_r8,1.0070E+00_r8,1.0840E+00_r8/
+      data dust_clear_d2(:) /2.4208E-01_r8,1.5300E-03_r8,1.1230E-04_r8/
+
+      data dust_cloudy_d0(:) /1.0388E+00_r8,1.0167E+00_r8,1.0189E+00_r8/
+      data dust_cloudy_d1(:) /1.0015E+00_r8,1.0061E+00_r8,1.0823E+00_r8/
+      data dust_cloudy_d2(:) /2.5973E-01_r8,1.6200E-03_r8,1.1721E-04_r8/
   !--------------------
+  real(r8) ap 
+  real(r8) bp 
+  real(r8) cp 
+  real(r8) dp 
+  real(r8) ep 
+  real(r8) fp 
+  real(r8) gp 
 
   real(r8) hs        ! net ground heat flux into the surface
   real(r8) dhsdT     ! temperature derivative of "hs"
   real(r8) heatavail ! available energy for melting or freezing (J/m^2)
   real(r8) heatrem   ! energy residual or loss after melting or freezing
   real(r8) melt      ! actual melting (+) or freezing (-) [kg/m2]
+  real(r8) snow_meltfrac
   real(r8) xmf       ! total per-column latent heat abs. from phase change  (J/m^2)
   !--------------------
 
@@ -636,12 +1305,65 @@ MODULE MOD_Lake
   integer jprime  ! j - nl_lake
 
   integer i,j     ! do loop or array index
+  integer aer
 
+  real(r8), intent(inout) :: &
+  mss_bcpho    ( maxsnl+1:0 ), &! mass of hydrophobic BC in snow  (col,lyr) [kg]
+  mss_bcphi    ( maxsnl+1:0 ), &! mass of hydrophillic BC in snow (col,lyr) [kg]
+  mss_ocpho    ( maxsnl+1:0 ), &! mass of hydrophobic OC in snow  (col,lyr) [kg]
+  mss_ocphi    ( maxsnl+1:0 ), &! mass of hydrophillic OC in snow (col,lyr) [kg]
+  mss_dst1     ( maxsnl+1:0 ), &! mass of dust species 1 in snow  (col,lyr) [kg]
+  mss_dst2     ( maxsnl+1:0 ), &! mass of dust species 2 in snow  (col,lyr) [kg]
+  mss_dst3     ( maxsnl+1:0 ), &! mass of dust species 3 in snow  (col,lyr) [kg]
+  mss_dst4     ( maxsnl+1:0 )   ! mass of dust species 4 in snow  (col,lyr) [kg]
+
+  logical do_capsnow      ! true => DO snow capping
+
+  real(r8) snwcp_ice                        !excess precipitation due to snow capping [kg m-2 s-1]
+  real(r8) mss_cnc_bcphi ( maxsnl+1:0 )     !mass concentration of hydrophilic BC (col,lyr) [kg/kg]
+  real(r8) mss_cnc_bcpho ( maxsnl+1:0 )     !mass concentration of hydrophobic BC (col,lyr) [kg/kg]
+  real(r8) mss_cnc_ocphi ( maxsnl+1:0 )     !mass concentration of hydrophilic OC (col,lyr) [kg/kg]
+  real(r8) mss_cnc_ocpho ( maxsnl+1:0 )     !mass concentration of hydrophobic OC (col,lyr) [kg/kg]
+  real(r8) mss_cnc_dst1  ( maxsnl+1:0 )     !mass concentration of dust aerosol species 1 (col,lyr) [kg/kg]
+  real(r8) mss_cnc_dst2  ( maxsnl+1:0 )     !mass concentration of dust aerosol species 2 (col,lyr) [kg/kg]
+  real(r8) mss_cnc_dst3  ( maxsnl+1:0 )     !mass concentration of dust aerosol species 3 (col,lyr) [kg/kg]
+  real(r8) mss_cnc_dst4  ( maxsnl+1:0 )     !mass concentration of dust aerosol species 4 (col,lyr) [kg/kg]
+  real(r8) mss_cnc_aer_in (maxsnl+1:0,sno_nbr_aer) ! mass concentration of aerosol species for forcing calculation (zero) (col,lyr,aer) [kg kg-1]
+  real(r8) snw_rds_in        ( maxsnl+1: 0) 
+  real(r8) albsfc         ( 1:numrad )   ! albedo of surface underlying snow (col,bnd) [frc]
+
+   real(r8) :: age1   ! snow aging factor due to crystal growth [-]
+   real(r8) :: age2   ! snow aging factor due to surface growth [-]
+   real(r8) :: age3   ! snow aging factor due to accum of other particles [-]
+   real(r8) :: arg    ! temporary variable used in snow age calculation [-]
+   real(r8) :: arg2   ! temporary variable used in snow age calculation [-]
+   real(r8) :: dela   ! temporary variable used in snow age calculation [-]
+   real(r8) :: dels   ! temporary variable used in snow age calculation [-]
+   real(r8) :: sge    ! temporary variable used in snow age calculation [-]
+
+   real(r8) ::        &!
+      age,          &! factor to reduce visible snow alb due to snow age [-]
+      albg0,        &! temporary varaiable [-]
+      albsno(2,2),  &! snow albedo [-]
+      albg(2,2),    &! albedo, ground
+      cff,          &! snow alb correction factor for zenith angle > 60 [-]
+      conn,         &! constant (=0.5) for visible snow alb calculation [-]
+      cons,         &! constant (=0.2) for nir snow albedo calculation [-]
+      czf,          &! solar zenith correction for new snow albedo [-]
+      dfalbl,       &! snow albedo for diffuse nir radiation [-]
+      dfalbs,       &! snow albedo for diffuse visible solar radiation [-]
+      dralbl,       &! snow albedo for visible radiation [-]
+      dralbs,       &! snow albedo for near infrared radiation [-]
+      sl,           &! factor that helps control alb zenith dependence [-]
+      snal0,        &! alb for visible,incident on new snow (zen ang<60) [-]
+      snal1          ! alb for NIR, incident on new snow (zen angle<60) [-]
 ! ======================================================================
 !*[1] constants and model parameters
 ! ======================================================================
 
 ! constants for lake temperature model
+
+  write(*,*)'twostream_first',DEF_USE_TWOSTREAM
       za = (/0.5, 0.6/)
       cwat = cpliq*denh2o     ! water heat capacity per unit volume
       cice_eff = cpice*denh2o ! use water density because layer depth is not adjusted for freezing
@@ -683,6 +1405,52 @@ MODULE MOD_Lake
 ! ======================================================================
 !*[2] pre-processing for the calcilation of the surface temperature and fluxes
 ! ======================================================================
+
+      ! IF (.not. DEF_USE_SNICAR .or. present(urban_call)) THEN
+      !    IF (DEF_USE_TWOSTREAM) THEN
+      !       if (snl == 0) then
+      !          ! calculate the nir fraction of absorbed solar.
+      !          betaprime = (sabgn+sabgnd)/max(1.e-5,sabgv+sabgn+sabgvd+sabgnd)
+      !          betavis = 0. ! The fraction of the visible (e.g. vis not nir from atm) sunlight
+      !                      ! absorbed in ~1 m of water (the surface layer za_lake).
+      !                      ! This is roughly the fraction over 700 nm but may depend on the details
+      !                      ! of atmospheric radiative transfer.
+      !                      ! As long as NIR = 700 nm and up, this can be zero.
+      !          betaprime = betaprime + (1.0-betaprime)*betavis
+      !       else
+      !          ! or frozen but no snow layers or
+      !          ! currently ignor the transmission of solar in snow and ice layers
+      !          ! to be updated in the future version
+      !          betaprime = 1.0
+      !       end if
+      !    ELSE 
+      !       if (snl == 0) then
+      !          ! calculate the nir fraction of absorbed solar.
+      !          betaprime = (forc_soll+forc_solld)/max(1.e-5,forc_sols+forc_soll+forc_solsd+forc_solld)
+      !          betavis = 0. ! The fraction of the visible (e.g. vis not nir from atm) sunlight
+      !                      ! absorbed in ~1 m of water (the surface layer za_lake).
+      !                      ! This is roughly the fraction over 700 nm but may depend on the details
+      !                      ! of atmospheric radiative transfer.
+      !                      ! As long as NIR = 700 nm and up, this can be zero.
+      !          betaprime = betaprime + (1.0-betaprime)*betavis
+      !       else
+      !          ! or frozen but no snow layers or
+      !          ! currently ignor the transmission of solar in snow and ice layers
+      !          ! to be updated in the future version
+      !          betaprime = 1.0
+      !       end if 
+      !    END IF 
+
+      ! ELSE
+      !    ! calculate the nir fraction of absorbed solar.
+      !    betaprime = (forc_soll+forc_solld)/max(1.e-5,forc_sols+forc_soll+forc_solsd+forc_solld)
+      !    betavis = 0. ! The fraction of the visible (e.g. vis not nir from atm) sunlight
+      !                 ! absorbed in ~1 m of water (the surface layer za_lake).
+      !                 ! This is roughly the fraction over 700 nm but may depend on the details
+      !                 ! of atmospheric radiative transfer.
+      !                 ! As long as NIR = 700 nm and up, this can be zero.
+      !    betaprime = betaprime + (1.0-betaprime)*betavis
+      ! ENDIF
 
       IF (.not. DEF_USE_SNICAR .or. present(urban_call)) THEN
          if (snl == 0) then
@@ -773,282 +1541,2514 @@ MODULE MOD_Lake
 !*[3] Begin stability iteration and temperature and fluxes calculation
 ! ======================================================================
 
+      IF( .not. DEF_USE_TWOSTREAM) then
+      ! =====================================
+         ITERATION : DO WHILE (iter <= itmax)
+      ! =====================================
 
-    ! =====================================
-      ITERATION : DO WHILE (iter <= itmax)
-    ! =====================================
+            t_grnd_bef = t_grnd
 
-         t_grnd_bef = t_grnd
-
-         if (t_grnd_bef > tfrz .and. t_lake(1) > tfrz .and. snl == 0) then
-            tksur = savedtke1       !water molecular conductivity
-            tsur = t_lake(1)
-            htvp = hvap
-         else if (snl == 0) then !frozen but no snow layers
-            tksur = tkice        ! This is an approximation because the whole layer may not be frozen, and it is not
-                                 ! accounting for the physical (but not nominal) expansion of the frozen layer.
-            tsur = t_lake(1)
-            htvp = hsub
-         else
-          ! need to calculate thermal conductivity of the top snow layer
-            rhosnow = (wice_soisno(lb)+wliq_soisno(lb))/dz_soisno(lb)
-            tksur = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
-            tsur = t_soisno(lb)
-            htvp = hsub
-         end if
-
-! Evaluated stability-dependent variables using moz from prior iteration
-         displax = 0.
-         if (DEF_USE_CBL_HEIGHT) then
-            call moninobuk_leddy(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um, hpbl, &
-                        ustar,fh2m,fq2m,fm10m,fm,fh,fq)
-         else
-            call moninobuk(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um,&
-                        ustar,fh2m,fq2m,fm10m,fm,fh,fq)
-         endif
-
-! Get derivative of fluxes with repect to ground temperature
-         ram    = 1./(ustar*ustar/um)
-         rah    = 1./(vonkar/fh*ustar)
-         raw    = 1./(vonkar/fq*ustar)
-         stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
-
-         ax  = betaprime*sabg + emg*forc_frl + 3.*stftg3*t_grnd_bef &
-             + forc_rhoair*cpair/rah*thm &
-             - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) &
-             + tksur*tsur/dzsur
-
-         bx  = 4.*stftg3 + forc_rhoair*cpair/rah &
-             + htvp*forc_rhoair/raw*qsatgdT + tksur/dzsur
-
-         t_grnd = ax/bx
-
-       !-----------------------------------------------------------------
-       ! h_fin = betaprime*sabg + emg*forc_frl + 3.*stftg3*t_grnd_bef & !
-       !     + forc_rhoair*cpair/rah*thm &                              !
-       !     - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) !
-       ! h_finDT = 4.*stftg3 + forc_rhoair*cpair/rah &                  !
-       !     + htvp*forc_rhoair/raw*qsatgdT                             !
-       ! del_T_grnd = t_grnd - t_grnd_bef                               !
-       !----------------------------------------------------------------!
-
-! surface fluxes of momentum, sensible and latent
-! using ground temperatures from previous time step
-
-         fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
-         fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
-
-         call qsadv(t_grnd,forc_psrf,eg,degdT,qsatg,qsatgdT)
-         dth = thm-t_grnd
-         dqh = forc_q-qsatg
-         tstar = vonkar/fh*dth
-         qstar = vonkar/fq*dqh
-         thvstar = tstar*(1.+0.61*forc_q)+0.61*th*qstar
-         zeta = zldis*vonkar*grav*thvstar/(ustar**2*thv)
-         if(zeta >= 0.) then     !stable
-           zeta = min(2.,max(zeta,1.e-6))
-         else                    !unstable
-           zeta = max(-100.,min(zeta,-1.e-6))
-         endif
-         obu = zldis/zeta
-         if(zeta >= 0.)then
-           um = max(ur,0.1)
-         else
-           if (DEF_USE_CBL_HEIGHT) then !//TODO: Shaofeng, 2023.05.18
-             zii = max(5.*forc_hgt_u,hpbl)
-           endif !//TODO: Shaofeng, 2023.05.18
-           wc = (-grav*ustar*thvstar*zii/thv)**(1./3.)
-          wc2 = beta1*beta1*(wc*wc)
-           um = sqrt(ur*ur+wc2)
-         endif
-
-         call roughness_lake (snl,t_grnd,t_lake(1),lake_icefrac(1),forc_psrf,&
-                              cur,ustar,z0mg,z0hg,z0qg)
-
-         iter = iter + 1
-         del_T_grnd = abs(t_grnd - t_grnd_bef)
-
-         if(iter .gt. itmin) then
-            if(del_T_grnd <= dtmin) then
-               convernum = convernum + 1
+            if (t_grnd_bef > tfrz .and. t_lake(1) > tfrz .and. snl == 0) then
+               tksur = savedtke1       !water molecular conductivity
+               tsur = t_lake(1)
+               htvp = hvap
+            else if (snl == 0) then !frozen but no snow layers
+               tksur = tkice        ! This is an approximation because the whole layer may not be frozen, and it is not
+                                    ! accounting for the physical (but not nominal) expansion of the frozen layer.
+               tsur = t_lake(1)
+               htvp = hsub
+            else
+            ! need to calculate thermal conductivity of the top snow layer
+               rhosnow = (wice_soisno(lb)+wliq_soisno(lb))/dz_soisno(lb)
+               tksur = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
+               tsur = t_soisno(lb)
+               htvp = hsub
             end if
-            if(convernum >= 4) EXIT
+
+   ! Evaluated stability-dependent variables using moz from prior iteration
+            displax = 0.
+            if (DEF_USE_CBL_HEIGHT) then
+               call moninobuk_leddy(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um, hpbl, &
+                           ustar,fh2m,fq2m,fm10m,fm,fh,fq)
+            else
+               call moninobuk(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um,&
+                           ustar,fh2m,fq2m,fm10m,fm,fh,fq)
+            endif
+
+   ! Get derivative of fluxes with repect to ground temperature
+            ram    = 1./(ustar*ustar/um)
+            rah    = 1./(vonkar/fh*ustar)
+            raw    = 1./(vonkar/fq*ustar)
+            stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
+
+            ax  = betaprime*sabg + emg*forc_frl + 3.*stftg3*t_grnd_bef &
+               + forc_rhoair*cpair/rah*thm &
+               - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) &
+               + tksur*tsur/dzsur
+
+            bx  = 4.*stftg3 + forc_rhoair*cpair/rah &
+               + htvp*forc_rhoair/raw*qsatgdT + tksur/dzsur
+
+            t_grnd = ax/bx
+
+         !-----------------------------------------------------------------
+         ! h_fin = betaprime*sabg + emg*forc_frl + 3.*stftg3*t_grnd_bef & !
+         !     + forc_rhoair*cpair/rah*thm &                              !
+         !     - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) !
+         ! h_finDT = 4.*stftg3 + forc_rhoair*cpair/rah &                  !
+         !     + htvp*forc_rhoair/raw*qsatgdT                             !
+         ! del_T_grnd = t_grnd - t_grnd_bef                               !
+         !----------------------------------------------------------------!
+
+   ! surface fluxes of momentum, sensible and latent
+   ! using ground temperatures from previous time step
+
+            fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+            fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+
+            call qsadv(t_grnd,forc_psrf,eg,degdT,qsatg,qsatgdT)
+            dth = thm-t_grnd
+            dqh = forc_q-qsatg
+            tstar = vonkar/fh*dth
+            qstar = vonkar/fq*dqh
+            thvstar = tstar*(1.+0.61*forc_q)+0.61*th*qstar
+            zeta = zldis*vonkar*grav*thvstar/(ustar**2*thv)
+            if(zeta >= 0.) then     !stable
+            zeta = min(2.,max(zeta,1.e-6))
+            else                    !unstable
+            zeta = max(-100.,min(zeta,-1.e-6))
+            endif
+            obu = zldis/zeta
+            if(zeta >= 0.)then
+            um = max(ur,0.1)
+            else
+            if (DEF_USE_CBL_HEIGHT) then !//TODO: Shaofeng, 2023.05.18
+               zii = max(5.*forc_hgt_u,hpbl)
+            endif !//TODO: Shaofeng, 2023.05.18
+            wc = (-grav*ustar*thvstar*zii/thv)**(1./3.)
+            wc2 = beta1*beta1*(wc*wc)
+            um = sqrt(ur*ur+wc2)
+            endif
+
+            call roughness_lake (snl,t_grnd,t_lake(1),lake_icefrac(1),forc_psrf,&
+                                 cur,ustar,z0mg,z0hg,z0qg)
+
+            iter = iter + 1
+            del_T_grnd = abs(t_grnd - t_grnd_bef)
+
+            if(iter .gt. itmin) then
+               if(del_T_grnd <= dtmin) then
+                  convernum = convernum + 1
+               end if
+               if(convernum >= 4) EXIT
+            endif
+
+      ! ===============================================
+         END DO ITERATION   ! end of stability iteration
+      ! ===============================================
+
+   !*----------------------------------------------------------------------
+   !*Zack Subin, 3/27/09
+   !*Since they are now a function of whatever t_grnd was before cooling
+   !*to freezing temperature, then this value should be used in the derivative correction term.
+   !*Allow convection if ground temp is colder than lake but warmer than 4C, or warmer than
+   !*lake which is warmer than freezing but less than 4C.
+         tdmax = tfrz + 4.0
+         if ( (snl < 0 .or. t_lake(1) <= tfrz) .and. t_grnd > tfrz) then
+            t_grnd_bef = t_grnd
+            t_grnd = tfrz
+            fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+            fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+         else if ( (t_lake(1) > t_grnd .and. t_grnd > tdmax) .or. &
+                  (t_lake(1) < t_grnd .and. t_lake(1) > tfrz .and. t_grnd < tdmax) ) then
+                  ! Convective mixing will occur at surface
+            t_grnd_bef = t_grnd
+            t_grnd = t_lake(1)
+            fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+            fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+         end if
+      
+   !*----------------------------------------------------------------------
+
+   ! net longwave from ground to atmosphere
+         stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
+         olrg = (1.-emg)*forc_frl + emg*stefnc*t_grnd_bef**4 + 4.*stftg3*(t_grnd - t_grnd_bef)
+         if (t_grnd > tfrz )then
+            htvp = hvap
+         else
+            htvp = hsub
+         end if
+
+   !The actual heat flux from the ground interface into the lake, not including the light that penetrates the surface.
+         fgrnd1 = betaprime*sabg + forc_frl - olrg - fseng - htvp*fevpg
+
+         ! January 12, 2023 by Yongjiu Dai
+         IF (DEF_USE_SNICAR .and. .not. present(urban_call)) THEN
+            hs = sabg_lyr(lb) + forc_frl - olrg - fseng - htvp*fevpg
+            dhsdT = 0.0
+         ENDIF
+
+   !------------------------------------------------------------
+   ! Set up vector r and vectors a, b, c that define tridiagonal matrix
+   ! snow and lake and soil layer temperature
+   !------------------------------------------------------------
+
+   !------------------------------------------------------------
+   ! Lake density
+   !------------------------------------------------------------
+      ! IF(DEF_USE_TWOSTREAM) then
+
+         do j = 1, nl_lake
+            rhow(j) = (1.-lake_icefrac(j))*denh2o*(1.0-1.9549e-05*(abs(t_lake(j)-277.))**1.68) &
+                        + lake_icefrac(j)*denice
+            ! allow for ice fraction; assume constant ice density.
+            ! this is not the correct average-weighting but that's OK because the density will only
+            ! be used for convection for lakes with ice, and the ice fraction will dominate the
+            ! density differences between layers.
+            ! using this average will make sure that surface ice is treated properly during
+            ! convective mixing.
+         end do
+      ! ENDIF
+   !------------------------------------------------------------
+   ! Diffusivity and implied thermal "conductivity" = diffusivity * cwat
+   !------------------------------------------------------------
+
+         do j = 1, nl_lake
+            cv_lake(j) = dz_lake(j) * (cwat*(1.-lake_icefrac(j)) + cice_eff*lake_icefrac(j))
+         end do
+
+         call hConductivity_lake(nl_lake,snl,t_grnd,&
+                                 z_lake,t_lake,lake_icefrac,rhow,&
+                                 dlat,ustar,z0mg,lakedepth,depthcrit,tk_lake,savedtke1)
+
+   !------------------------------------------------------------
+   ! Set the thermal properties of the snow above frozen lake and underlying soil
+   ! and check initial energy content.
+   !------------------------------------------------------------
+
+         lb = snl+1
+         do i = 1, nl_soil
+            vf_water(i) = wliq_soisno(i)/(dz_soisno(i)*denh2o)
+            vf_ice(i) = wice_soisno(i)/(dz_soisno(i)*denice)
+            CALL soil_hcap_cond(vf_gravels(i),vf_om(i),vf_sand(i),porsl(i),&
+                              wf_gravels(i),wf_sand(i),k_solids(i),&
+                              csol(i),dkdry(i),dksatu(i),dksatf(i),&
+                              BA_alpha(i),BA_beta(i),&
+                              t_soisno(i),vf_water(i),vf_ice(i),hcap(i),thk(i))
+            cv_soisno(i) = hcap(i)*dz_soisno(i)
+         enddo
+
+   ! Snow heat capacity and conductivity
+         if(lb <=0 )then
+         do j = lb, 0
+            cv_soisno(j) = cpliq*wliq_soisno(j) + cpice*wice_soisno(j)
+            rhosnow = (wice_soisno(j)+wliq_soisno(j))/dz_soisno(j)
+            thk(j) = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
+         enddo
          endif
 
-    ! ===============================================
-      END DO ITERATION   ! end of stability iteration
-    ! ===============================================
+   ! Thermal conductivity at the layer interface
+         do i = lb, nl_soil-1
 
-!*----------------------------------------------------------------------
-!*Zack Subin, 3/27/09
-!*Since they are now a function of whatever t_grnd was before cooling
-!*to freezing temperature, then this value should be used in the derivative correction term.
-!*Allow convection if ground temp is colder than lake but warmer than 4C, or warmer than
-!*lake which is warmer than freezing but less than 4C.
-    tdmax = tfrz + 4.0
-    if ( (snl < 0 .or. t_lake(1) <= tfrz) .and. t_grnd > tfrz) then
-       t_grnd_bef = t_grnd
-       t_grnd = tfrz
-         fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
-         fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
-    else if ( (t_lake(1) > t_grnd .and. t_grnd > tdmax) .or. &
-              (t_lake(1) < t_grnd .and. t_lake(1) > tfrz .and. t_grnd < tdmax) ) then
-              ! Convective mixing will occur at surface
-       t_grnd_bef = t_grnd
-       t_grnd = t_lake(1)
-         fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
-         fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
-    end if
-!*----------------------------------------------------------------------
+   ! the following consideration is try to avoid the snow conductivity
+   ! to be dominant in the thermal conductivity of the interface.
+   ! Because when the distance of bottom snow node to the interfacee
+   ! is larger than that of interface to top soil node,
+   ! the snow thermal conductivity will be dominant, and the result is that
+   ! lees heat tranfer between snow and soil
 
-! net longwave from ground to atmosphere
-       stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
-       olrg = (1.-emg)*forc_frl + emg*stefnc*t_grnd_bef**4 + 4.*stftg3*(t_grnd - t_grnd_bef)
-       if (t_grnd > tfrz )then
-         htvp = hvap
-       else
-         htvp = hsub
-       end if
+   ! modified by Nan Wei, 08/25/2014
+            if (i /= 0) then
+               tk_soisno(i) = thk(i)*thk(i+1)*(z_soisno(i+1)-z_soisno(i)) &
+                     /(thk(i)*(z_soisno(i+1)-zi_soisno(i))+thk(i+1)*(zi_soisno(i)-z_soisno(i)))
+            else
+               tk_soisno(i) = thk(i)
+            end if
+         end do
+         tk_soisno(nl_soil) = 0.
+         tktopsoil = thk(1)
 
-!The actual heat flux from the ground interface into the lake, not including the light that penetrates the surface.
-      fgrnd1 = betaprime*sabg + forc_frl - olrg - fseng - htvp*fevpg
+   ! Sum cv_lake*t_lake for energy check
+   ! Include latent heat term, and use tfrz as reference temperature
+   ! to prevent abrupt change in heat content due to changing heat capacity with phase change.
 
-      ! January 12, 2023 by Yongjiu Dai
-      IF (DEF_USE_SNICAR .and. .not. present(urban_call)) THEN
-         hs = sabg_lyr(lb) + forc_frl - olrg - fseng - htvp*fevpg
-         dhsdT = 0.0
+         ! This will need to be over all soil / lake / snow layers. Lake is below.
+         ocvts = 0.
+         do j = 1, nl_lake
+            ocvts = ocvts + cv_lake(j)*(t_lake(j)-tfrz) + cfus*dz_lake(j)*(1.-lake_icefrac(j))
+         end do
+
+         ! Now do for soil / snow layers
+         do j = lb, nl_soil
+            ocvts = ocvts + cv_soisno(j)*(t_soisno(j)-tfrz) + hfus*wliq_soisno(j)
+            if (j == 1 .and. scv > 0. .and. j == lb) then
+               ocvts = ocvts - scv*hfus
+            end if
+         end do
+      ! ENDIF   ! End copy
+
+      !------------------------------------------------------------
+      ! Lake density
+      !------------------------------------------------------------
+      ELSE 
+         do j = 1, nl_lake
+            rhow(j) = (1.-lake_icefrac(j))*denh2o*(1.0-1.9549e-05*(abs(t_lake(j)-277.))**1.68) &
+                        + lake_icefrac(j)*denice
+            ! allow for ice fraction; assume constant ice density.
+            ! this is not the correct average-weighting but that's OK because the density will only
+            ! be used for convection for lakes with ice, and the ice fraction will dominate the
+            ! density differences between layers.
+            ! using this average will make sure that surface ice is treated properly during
+            ! convective mixing.
+         end do
       ENDIF
-
-!------------------------------------------------------------
-! Set up vector r and vectors a, b, c that define tridiagonal matrix
-! snow and lake and soil layer temperature
-!------------------------------------------------------------
-
-!------------------------------------------------------------
-! Lake density
-!------------------------------------------------------------
-
-      do j = 1, nl_lake
-         rhow(j) = (1.-lake_icefrac(j))*denh2o*(1.0-1.9549e-05*(abs(t_lake(j)-277.))**1.68) &
-                     + lake_icefrac(j)*denice
-         ! allow for ice fraction; assume constant ice density.
-         ! this is not the correct average-weighting but that's OK because the density will only
-         ! be used for convection for lakes with ice, and the ice fraction will dominate the
-         ! density differences between layers.
-         ! using this average will make sure that surface ice is treated properly during
-         ! convective mixing.
-      end do
-
-!------------------------------------------------------------
-! Diffusivity and implied thermal "conductivity" = diffusivity * cwat
-!------------------------------------------------------------
-
-      do j = 1, nl_lake
-         cv_lake(j) = dz_lake(j) * (cwat*(1.-lake_icefrac(j)) + cice_eff*lake_icefrac(j))
-      end do
-
-      call hConductivity_lake(nl_lake,snl,t_grnd,&
-                              z_lake,t_lake,lake_icefrac,rhow,&
-                              dlat,ustar,z0mg,lakedepth,depthcrit,tk_lake,savedtke1)
-
-!------------------------------------------------------------
-! Set the thermal properties of the snow above frozen lake and underlying soil
-! and check initial energy content.
-!------------------------------------------------------------
-
-      lb = snl+1
-      do i = 1, nl_soil
-         vf_water(i) = wliq_soisno(i)/(dz_soisno(i)*denh2o)
-         vf_ice(i) = wice_soisno(i)/(dz_soisno(i)*denice)
-         CALL soil_hcap_cond(vf_gravels(i),vf_om(i),vf_sand(i),porsl(i),&
-                             wf_gravels(i),wf_sand(i),k_solids(i),&
-                             csol(i),dkdry(i),dksatu(i),dksatf(i),&
-                             BA_alpha(i),BA_beta(i),&
-                             t_soisno(i),vf_water(i),vf_ice(i),hcap(i),thk(i))
-         cv_soisno(i) = hcap(i)*dz_soisno(i)
-      enddo
-
-! Snow heat capacity and conductivity
-      if(lb <=0 )then
-        do j = lb, 0
-           cv_soisno(j) = cpliq*wliq_soisno(j) + cpice*wice_soisno(j)
-           rhosnow = (wice_soisno(j)+wliq_soisno(j))/dz_soisno(j)
-           thk(j) = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
-        enddo
-      endif
-
-! Thermal conductivity at the layer interface
-      do i = lb, nl_soil-1
-
-! the following consideration is try to avoid the snow conductivity
-! to be dominant in the thermal conductivity of the interface.
-! Because when the distance of bottom snow node to the interfacee
-! is larger than that of interface to top soil node,
-! the snow thermal conductivity will be dominant, and the result is that
-! lees heat tranfer between snow and soil
-
-! modified by Nan Wei, 08/25/2014
-         if (i /= 0) then
-            tk_soisno(i) = thk(i)*thk(i+1)*(z_soisno(i+1)-z_soisno(i)) &
-                  /(thk(i)*(z_soisno(i+1)-zi_soisno(i))+thk(i+1)*(zi_soisno(i)-z_soisno(i)))
-         else
-            tk_soisno(i) = thk(i)
-         end if
-      end do
-      tk_soisno(nl_soil) = 0.
-      tktopsoil = thk(1)
-
-! Sum cv_lake*t_lake for energy check
-! Include latent heat term, and use tfrz as reference temperature
-! to prevent abrupt change in heat content due to changing heat capacity with phase change.
-
-      ! This will need to be over all soil / lake / snow layers. Lake is below.
-      ocvts = 0.
-      do j = 1, nl_lake
-         ocvts = ocvts + cv_lake(j)*(t_lake(j)-tfrz) + cfus*dz_lake(j)*(1.-lake_icefrac(j))
-      end do
-
-      ! Now do for soil / snow layers
-      do j = lb, nl_soil
-         ocvts = ocvts + cv_soisno(j)*(t_soisno(j)-tfrz) + hfus*wliq_soisno(j)
-         if (j == 1 .and. scv > 0. .and. j == lb) then
-            ocvts = ocvts - scv*hfus
-         end if
-      end do
-
       ! Set up solar source terms (phix)
       ! Modified January 12, 2023 by Yongjiu Dai
+
       IF (.not. DEF_USE_SNICAR .or. present(urban_call)) THEN
-         if ((t_grnd > tfrz .and. t_lake(1) > tfrz .and. snl == 0)) then      !no snow cover, unfrozen layer lakes
+         lakealb_direct_shortwave = 1.0
+         lakealb_diffuse_shortwave= 1.0
+         lakealb_direct_vis = 1.0
+         lakealb_diffuse_vis= 1.0
+         lakealb_direct_nir = 1.0
+         lakealb_diffuse_nir= 1.0                  
+         IF(DEF_USE_ORIGINAL)THEN
+            write(*,*)'original'
+            write(*,*)'t_grnd',t_grnd ,' t_lake(1)', t_lake(1) , tfrz, lake_icefrac(1)
+
+            ! lakealb_nir = 9999.0
+            ! if(t_lake(1) < 273.16) then 
+            !    ! lakealb_vis = 0.6
+            !    ! lakealb_nir = 0.4
+            ! endif               
+            if ((t_grnd > tfrz .and. t_lake(1) > tfrz .and. snl == 0)) then      !no snow cover, unfrozen layer lakes
+               calday = calendarday(idate)
+               coszen=orb_coszen(calday,dlon,dlat) 
+               ! lakealb_vis = 0.05/(coszen+0.15)
+               ! lakealb_nir = 0.1
+               do j = 1, nl_lake
+                  ! extinction coefficient from surface data (1/m), if no eta from surface data,
+                  ! set eta, the extinction coefficient, according to L Hakanson, Aquatic Sciences, 1995
+                  ! (regression of secchi depth with lake depth for small glacial basin lakes), and the
+                  ! Poole & Atkins expression for extinction coeffient of 1.7 / secchi Depth (m).
+
+                  eta = 1.1925*max(lakedepth,1.)**(-0.424)
+                  ! eta = 0.314
+                  zin  = z_lake(j) - 0.5*dz_lake(j)
+                  zout = z_lake(j) + 0.5*dz_lake(j)
+                  rsfin  = exp( -eta*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfout = exp( -eta*max( zout-za(idlak),0. ) )  ! is considered fixed at (1-beta)*sabg
+                                                               ! i.e, max(z-za, 0)
+                  ! Let rsfout for bottom layer go into soil.
+                  ! This looks like it should be robust even for pathological cases,
+                  ! like lakes thinner than za(idlak).
+
+                  phi(j) = (rsfin-rsfout) * sabg * (1.-betaprime)
+                  if (j == nl_lake) phi_soil = rsfout * sabg * (1.-betaprime)
+               end do
+            else if (snl == 0) then     !no snow-covered layers, but partially frozen
+               phi(1) = sabg * (1.-betaprime)
+               phi(2:nl_lake) = 0.
+               phi_soil = 0.
+            else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
+                  ! cause spring convection.
+               phi(:) = 0.
+               phi_soil = 0.
+            end if
+            do i = 1, nl_lake
+               write(*,*)i,phi(i)
+            enddo 
+            write(*,*)'phi_soil',phi_soil
+            calday = calendarday(idate)
+            coszen=orb_coszen(calday,dlon,dlat) 
+            
+            if (coszen > 0.) then 
+               write(*,*)'coszen',coszen
+               czen=max(coszen,0.001)
+               albg0 = 0.05/(czen+0.15)
+               albg(:,1) = albg0
+               albg(:,2) = 0.1                 !Subin (2012)
+
+               IF(t_grnd < tfrz)THEN           !frozen lake and wetland
+                  albg(1,:) = 0.6
+                  albg(2,:) = 0.4
+               ENDIF
+               write(*,*)'end albg ori'
+               IF (scv > 0.) THEN
+                  write(*,*)'in scv'
+                  snal0 = 0.85     ! visible band
+                  snal1 = 0.65     ! near infrared
+                  cons = 0.2
+                  conn = 0.5
+                  sl   = 2.0               !sl helps control albedo zenith dependence
+
+                  ! 05/02/2023, Dai: move from CoLMMAIN.F90
+                  ! update the snow age
+                  IF (snl == 0) sag=0.
+                  write(*,*)'start snowage'
+                  ! CALL snowage (deltim,t_grnd,scv,scvold,sag)
+                  IF(scv <= 0.) THEN
+                     sag = 0.
+            !
+            ! Over antarctica
+            !
+                  ELSE IF (scv > 800.) THEN
+                     sag = 0.
+            !
+            ! Away from antarctica
+            !
+                  ELSE
+                     age3  = 0.3
+                     arg   = 5.e3*(1./tfrz-1./t_grnd)
+                     arg2  = min(0.,10.*arg)
+                     age2  = exp(arg2)
+                     age1  = exp(arg)
+                     dela  = 1.e-6*deltim*(age1+age2+age3)
+                     dels  = 0.1*max(0.0,scv-scvold)
+                     sge   = (sag+dela)*(1.0-dels)
+                     sag   = max(0.0,sge)
+                  ENDIF
+
+                  ! correction for snow age
+                  age    = 1.-1./(1.+sag)
+                  dfalbs = snal0*(1.-cons*age)
+
+                  ! czf corrects albedo of new snow for solar zenith
+                  cff    = ((1.+1./sl)/(1.+czen*2.*sl )- 1./sl)
+                  cff    = max(cff,0.)
+                  czf    = 0.4*cff*(1.-dfalbs)
+                  dralbs = dfalbs+czf
+                  dfalbl = snal1*(1.-conn*age)
+                  czf    = 0.4*cff*(1.-dfalbl)
+                  dralbl = dfalbl+czf
+
+                  albsno(1,1) = dralbs
+                  albsno(2,1) = dralbl
+                  albsno(1,2) = dfalbs
+                  albsno(2,2) = dfalbl
+                  write(*,*)'end snowage'
+               ENDIF 
+               write(*,*)'out scv'
+               write(*,*)'coszen',coszen
+               slr_zen = nint(acos(coszen) * 180._r8 / SHR_CONST_PI)
+               write(*,*)'slr_zen',slr_zen
+               if (slr_zen>89) then
+                  slr_zen = 89
+               endif
+               write(*,*)'end slr_zen'
+               albg(:,:) = (1.-fsno)*albg(:,:) + fsno*albsno(:,:)
+               lakealb_direct_vis = albg(1,1)
+               lakealb_diffuse_vis= albg(1,2)
+               lakealb_direct_nir = albg(2,1)
+               lakealb_diffuse_nir= albg(2,2)
+               lakealb_direct_shortwave = lakealb_direct_vis*flx_slr(1, slr_zen+1) + lakealb_direct_nir*(flx_slr(2, slr_zen+1) &
+                                                                                 + flx_slr(3, slr_zen+1) + flx_slr(4, slr_zen+1) &
+                                                                                 + flx_slr(5, slr_zen+1) ) 
+               lakealb_diffuse_shortwave= lakealb_diffuse_vis*0.612938087 + lakealb_diffuse_nir*0.387061913
+            endif
+         ! ENDIF
+         ELSE IF(DEF_USE_ONEBANDICE)THEN
+         ! IF(DEF_USE_ONEBANDICE)THEN
+            if ((t_grnd > tfrz .and. t_lake(1) > tfrz .and. snl == 0)) then      !no snow cover, unfrozen layer lakes
+               do j = 1, nl_lake
+                  ! extinction coefficient from surface data (1/m), if no eta from surface data,
+                  ! set eta, the extinction coefficient, according to L Hakanson, Aquatic Sciences, 1995
+                  ! (regression of secchi depth with lake depth for small glacial basin lakes), and the
+                  ! Poole & Atkins expression for extinction coeffient of 1.7 / secchi Depth (m).
+
+                  etav = 0.239012444
+                  zin  = z_lake(j) - 0.5*dz_lake(j)
+                  zout = z_lake(j) + 0.5*dz_lake(j)
+                  rsfin  = exp( -etav*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfout = exp( -etav*max( zout-za(idlak),0. ) )  ! is considered fixed at (1-beta)*sabg
+                                                               ! i.e, max(z-za, 0)
+                  ! Let rsfout for bottom layer go into soil.
+                  ! This looks like it should be robust even for pathological cases,
+                  ! like lakes thinner than za(idlak).
+
+                  phi(j) = (rsfin-rsfout) * sabg * (1.-betaprime)
+                  if (j == nl_lake) phi_soil = rsfout * sabg * (1.-betaprime)
+               end do
+            else if (snl == 0) then     !no snow-covered layers, but partially frozen
+               do j = 1, nl_lake
+                  etav = 0.239012444
+                  etaiv = 1.5
+                  zin  = z_lake(j) - 0.5*dz_lake(j)
+                  zout = z_lake(j) + 0.5*dz_lake(j)
+                  rsfin  = exp( -etav*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfout = exp( -etav*max( zout-za(idlak),0. ) )
+                  rsfinv  = exp( -etaiv*max(  zin-za(idlak),0. ) ) 
+                  rsfoutv = exp( -etaiv*max( zout-za(idlak),0. ) )
+                  if(j == 1) then
+                     phi(j) = sabg * (1.-betaprime) * (1. - (1-lake_icefrac(j)) * rsfout - &
+                              lake_icefrac(j)  * rsfoutv  )
+                  else
+                     phi(j) = sabg * (1.-betaprime) * ((1-lake_icefrac(j-1)) * rsfin + lake_icefrac(j-1) * rsfinv  &
+                                                      -  (1-lake_icefrac(j)) * rsfout  - lake_icefrac(j) * rsfoutv )
+                  end if
+                     if (j == nl_lake) phi_soil = (1-lake_icefrac(j)) * sabg * (1.-betaprime) * rsfout + &
+                                                lake_icefrac(j)  * sabg * (1.-betaprime) * rsfoutv 
+               end do
+            else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
+                  ! cause spring convection.
+               phi(:) = 0.
+               phi_soil = 0.
+            end if
+         ! ENDIF
+         ELSE IF(DEF_USE_TWOBANDICE)THEN
+            if ((t_grnd > tfrz .and. t_lake(1) > tfrz .and. snl == 0)) then      !no snow cover, unfrozen layer lakes
+               do j = 1, nl_lake
+                  ! extinction coefficient from surface data (1/m), if no eta from surface data,
+                  ! set eta, the extinction coefficient, according to L Hakanson, Aquatic Sciences, 1995
+                  ! (regression of secchi depth with lake depth for small glacial basin lakes), and the
+                  ! Poole & Atkins expression for extinction coeffient of 1.7 / secchi Depth (m).
+                  etav = 0.239012444
+                  etan = 7
+                  zin  = z_lake(j) - 0.5*dz_lake(j)
+                  zout = z_lake(j) + 0.5*dz_lake(j)
+                  rsfinvw  = exp( -etav*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfoutvw = exp( -etav*max( zout-za(idlak),0. ) )  ! is considered fixed at (1-beta)*sabg
+                  rsfinnw  = exp( -etan*max(  zin-za(idlak),0. ) )
+                  rsfoutnw  = exp( -etan*max( zout-za(idlak),0. ) )                                           ! i.e, max(z-za, 0)
+                  ! Let rsfout for bottom layer go into soil.
+                  ! This looks like it should be robust even for pathological cases,
+                  ! like lakes thinner than za(idlak).
+
+                  phi(j) = (1-betaprime)*((rsfinvw-rsfoutvw) * sabg * (1.-betaprime)+(rsfinnw-rsfoutnw) * sabg * betaprime)
+                  if (j == nl_lake) phi_soil = (1-betaprime)*(rsfoutvw * sabg * (1.-betaprime)+ rsfoutnw * sabg * betaprime)
+               end do
+            else if (snl == 0) then     !no snow-covered layers, but partially frozen
+               do j = 1, nl_lake
+                  etav = 0.239012444
+                  etan = 7
+                  etaiv = 1.5
+                  etain = 20
+                  zin  = z_lake(j) - 0.5*dz_lake(j)
+                  zout = z_lake(j) + 0.5*dz_lake(j)
+                  rsfinvw  = exp( -etav*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfoutvw = exp( -etav*max( zout-za(idlak),0. ) )
+                  rsfinnw  = exp( -etan*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
+                  rsfoutnw = exp( -etan*max( zout-za(idlak),0. ) )
+                  rsfinv  = exp( -etaiv*max(  zin-za(idlak),0. ) ) 
+                  rsfoutv = exp( -etaiv*max( zout-za(idlak),0. ) )
+                  rsfinn  = exp( -etain*max(  zin-za(idlak),0. ) ) 
+                  rsfoutn = exp( -etain*max( zout-za(idlak),0. ) )
+                  if(j == 1) then
+                     phi(j) = sabg *(1-betaprime)* (1. - (1-lake_icefrac(j)) * (rsfoutvw*(1-betaprime) + rsfoutnw*betaprime) &
+                              - lake_icefrac(j)  * (rsfoutv * (1.-betaprime) + rsfoutn * betaprime))
+                  else
+                     phi(j) = sabg*(1-betaprime)* ((1-lake_icefrac(j-1)) * (rsfinvw *(1-betaprime) + rsfinnw *betaprime) &
+                              + lake_icefrac(j-1) * (rsfinv * (1.-betaprime) + rsfinn * betaprime) &
+                              -  (1-lake_icefrac(j)) * (rsfoutvw*(1-betaprime)+rsfoutnw*betaprime) &
+                              - lake_icefrac(j) * (rsfoutv * (1.-betaprime) + rsfoutn * betaprime))
+                  end if
+                     if (j == nl_lake) phi_soil = (1-lake_icefrac(j)) * sabg *(1-betaprime)*( (1.-betaprime) * rsfoutvw + betaprime * rsfoutnw) &
+                                                +lake_icefrac(j)  * sabg * (1-betaprime)*(rsfoutv * (1.-betaprime) + rsfoutn * betaprime)
+               end do
+            else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
+                  ! cause spring convection.
+               phi(:) = 0.
+               phi_soil = 0.
+            end if 
+
+
+         ! ELSE IF(DEF_USE_TWOSTREAM)THEN
+         !    calday = calendarday(idate)
+         !    czen=orb_coszen(calday,dlon,dlat)
+         !    coszen=max(czen,0.001)
+
+         !    if (snl == 0) then
+         !       do j = 1, nl_lake
+         !          etatsa(j)=0.239012444*(1-lake_icefrac(j))+1.5*lake_icefrac(j)
+         !       end do
+         !       pi=3.14159265359  
+         !       tao(1) = 0.
+         !       do j = 2, nl_lake+1
+         !          dtao(j-1) = etatsa(j-1)*dz_lake(j-1) 
+         !          tao(j) = tao(j-1) + dtao(j-1)
+         !          print*,'tao',j,tao(j)
+         !       end do
+         !       w0=0.3568144
+         !       g=0.0442765
+         !       f=sabgvd/coszen
+         !       s1=f*w0/(4*pi)*(1+3*g*(1.0/(3**0.5))*coszen)
+         !       s2=f*w0/(4*pi)*(1-3*g*(1.0/(3**0.5))*coszen)
+         !       k=((1.0-w0)*(1.0-w0*g)/(1.0/3.0))**0.5
+         !       ssa=((1.0-w0)/(1.0-w0*g))**0.5
+         !       z1=-((1.0-w0*g)*(s2+s1))/(1.0/3.0)+(s2-s1)/(1.0/(3**0.5)*coszen) 
+         !       z2=-((1.0-w0)*(s2-s1))/(1.0/3.0)+(s2+s1)/(1.0/(3**0.5)*coszen) 
+         !       saa=z1*(coszen**2.0)/(1.0-(coszen**2.0)*(k**2.0)) !right
+         !       sbe=z2*(coszen**2.0)/(1.0-(coszen**2.0)*(k**2.0)) !right
+         !       se=(saa+sbe)/2.0
+         !       sr=(saa-sbe)/2.0
+         !       sv=(1.+ssa)/2.0
+         !       su=(1.-ssa)/2.0
+         !       tu=exp(-tao(nl_lake+1)/coszen)
+         !       !print*,tu,coszen,-tao(nl_lake+1)/coszen,exp(-tao(nl_lake+1)/coszen)
+         !       ! print*,'se',se, 'sr', sr,'sv',sv, 'su',su
+         !       !F-(0)=sabgvda F+(nl_lake+1)=0
+         !       ! ssh=(sv*sr*exp(k*tao(nl_lake+1))-su*se*exp(tu)-sv*sabgvd*exp(k*tao(nl_lake+1))/(2*pi*(1.0/(3.**0.5))))&
+         !       !      /(su**2*exp(-k*tao(nl_lake+1))-sv**2*exp(k*tao(nl_lake+1)))
+         !       ! ssk=sabgvd/(su*2*pi*(1.0/(3.**0.5)))-ssh*sv/su-sr/su
+         !       !F-(0)-F+(0)=sabgvd F+(nl_lake+1)=0
+         !       ssh=(sv*((sr-se)/(su-sv))*exp(k*tao(nl_lake+1))-sv*sabgvd*exp(k*tao(nl_lake+1))/(su-sv)/(2*pi*(1.0/(3.**0.5)))&
+         !            -se*tu)/(sv*exp(k*tao(nl_lake+1))+su*exp(-k*tao(nl_lake+1)))
+         !       ssk=ssh+sabgvd/(su-sv)/(2*pi*(1.0/(3.**0.5)))+(se-sr)/(su-sv)
+         !       !F+(0)=sabgvdu F+(nl_lake+1)=0               
+         !       ! ssh=(se*exp(k*tao(nl_lake+1))-sabgvdu*exp(k*tao(nl_lake+1))-se*exp(tu))&
+         !       !      /(su*exp(k*tao(nl_lake+1))-su*exp(-k*tao(nl_lake+1)))
+         !       ! ssk=(sabgvdu-ssh*su-se)/sv
+         !       ! print*,'ssh',ssh,'ssk',ssk
+         !       r1=(1.0/(1.0/(3.0**0.5)))*(1.0-(w0/2.0)*(1.0+g))
+         !       r2=(w0/(2.*(1.0/(3.**0.5))))*(1.0-g)
+         !       r3=(1.0/2.0)*(1.0-3.0*g*(1.0/(3**0.5))*coszen)
+         !       k2=(r1**2-r2**2)**0.5 !right
+         !       sv2=(1.0/2.0)*(1.0+(r1-r2)/k2) !right
+         !       su2=(1.0/2.0)*(1.0-(r1-r2)/k2) !right
+         !       se2=(r3*(1.0/coszen-r1)-r2*(1-r3))*(coszen**2)*w0*f/(1-(coszen**2)*(k2**2))
+         !       sr2=-((1-r3)*(1.0/coszen+r1)+r2*r3)*(coszen**2)*w0*f/(1-(coszen**2)*(k2**2))
+         !       !F-(0)=sabgvda F+(nl_lake+1)=0
+         !       ! sh2=(sv2*sr2*exp(k2*tao(nl_lake+1))-sv2*sabgvda*exp(k2*tao(nl_lake+1))-su2*se2*tu)&
+         !       !     /(su2**2*exp(-k2*tao(nl_lake+1))-sv2**2*exp(k2*tao(nl_lake+1)))
+         !       ! sk2=(sabgvda-sv2*sh2-sr2)/su2
+         !       !F-(0)-F+(0)=sabgvd F+(nl_lake+1)=0
+         !       sh2=((sabgvd+se2-sr2)*sv2*exp(k2*tao(11))/(sv2-su2)-se2*tu)&
+         !            /(sv2*exp(k2*tao(11))+su2*exp(-k2*tao(11)))
+         !       sk2=sh2+sabgvd/(su2-sv2)+(se2-sr2)/(su2-sv2)
+
+         !       do j = 1, nl_lake+1
+         !          ttu=exp(-tao(j)/coszen)
+         !          !print*,j,coszen*f*ttu
+         !          !fangan1
+         !          ! eup(j)=2.0*pi*(1.0/(3**0.5))*(ssk*su*exp(k*tao(j))+ssh*sv*exp(-k*tao(j))+sr*ttu)&
+         !          !       +sabgv*ttu&
+         !          !       -2.0*pi*(1.0/(3**0.5))*(ssk*sv*exp(k*tao(j))+ssh*su*exp(-k*tao(j))+se*ttu)
+         !          ! eupd(j)=2.0*pi*(1.0/(3**0.5))*(ssk*su*exp(k*tao(j))+ssh*sv*exp(-k*tao(j))+sr*ttu)&
+         !          !        -2.0*pi*(1.0/(3**0.5))*(ssk*sv*exp(k*tao(j))+ssh*su*exp(-k*tao(j))+se*ttu)
+         !          ! !fangan2
+         !          eup(j)=su2*sk2*exp(k2*tao(j))+sv2*sh2*exp(-k2*tao(j))+sr2*ttu&
+         !                 +sabgv*ttu&
+         !                 -(sv2*sk2*exp(k2*tao(j))+su2*sh2*exp(-k2*tao(j))+se2*ttu)
+         !          eupd(j)=su2*sk2*exp(k2*tao(j))+sv2*sh2*exp(-k2*tao(j))+sr2*ttu&
+         !                 -(sv2*sk2*exp(k2*tao(j))+su2*sh2*exp(-k2*tao(j))+se2*ttu)
+         !          eupz(j)=sabgv*ttu                  
+         !       end do 
+         !       sum = 0
+         !       do j = 1,nl_lake+1
+         !       !    ttu=exp(-tao(j)/coszen)
+         !          ! print*,'edown',j,su2*sk2*exp(k2*tao(j))+sv2*sh2*exp(-k2*tao(j))+sr2*ttu&
+         !          !        +sabgv*ttu
+         !       end do
+         !       do j = 1, nl_lake+1
+         !          ! print*,'eup',j,sv2*sk2*exp(k2*tao(j))+su2*sh2*exp(-k2*tao(j))+se2*ttu
+         !       end do
+         !       do j = 1, nl_lake
+         !          phi(j)=eup(j)-eup(j+1)
+         !          print*,j,phi(j)
+         !          sum=sum+phi(j)
+         !          if (j == nl_lake) phi_soil = eup(j+1)
+         !       end do
+         !       ! print*,'bj',sabgvd,eupd(1),sv2*sk2*exp(k2*tao(11))+su2*sh2*exp(-k2*tao(11))+se2*tu
+         !       ! print*,'check energy',sum+sk2*su2*exp(k2*tao(11))+sh2*sv2*exp(-k2*tao(11))&    !sv2*sk2+su2*sh2+se2+
+         !       !          +sr2*exp(-tao(11)/coszen)&
+         !       !          +sabgv*exp(-tao(11)/coszen),&
+         !       !          sabgv+sabgvd,sabgn+sabgnd,sabg*(1-betaprime),(sabgv+sabgvd+sabgn+sabgnd)*(1-betaprime),betaprime
+         !    else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
+         !          ! cause spring convection.
+         !       phi(:) = 0.
+         !       phi_soil = 0.
+         !    end if 
+
+            ! if (snl == 0) then      !no snow cover
+            !    do j = 1, nl_lake
+            !      etatsa1(j)=0.69*(1-lake_icefrac(j))+1.5*lake_icefrac(j)
+            !    end do 
+            !    pi=3.1415926
+            !    uavg=0.5
+            !    topc = sabg*(1.-betaprime)/(2*pi*uavg)
+            !    print*, topc 
+            !    tao(1) = 0.
+            !    do j = 2, nl_lake+1
+            !       dtao(j-1) = etatsa(j-1)*dz_lake(j-1) 
+            !       tao(j) = tao(j-1) + dtao(j-1)
+            !    end do
+            !   w10=0.595356
+            !    daT = (1-w0)**(0.5)/uavg 
+            !    rou = (1-uavg*daT)/(1+uavg*daT)
+            !    ! print*, T
+            !    ! print*, rou
+            !    ! print*, tao(nl_lake+1)
+            !    D = exp(daT*tao(nl_lake+1))-(rou**2)*exp(-daT*tao(nl_lake+1))
+            !    ! print*, D
+            !    do j = 1, nl_lake+1
+            !       eup(j)=-2*uavg*pi*topc*(1-rou)*(exp(daT*(tao(nl_lake+1)-tao(j)))+rou*exp(-daT*(tao(nl_lake+1)-tao(j))))/D
+            !    end do
+            !    sum=0
+            !    do j = 1, nl_lake
+            !       phi(j)=eup(j+1)-eup(j)
+            !       sum=sum+phi(j)
+            !       if (j == nl_lake) phi_soil = -eup(j+1)
+            !    end do 
+            !    sum = sum + phi_soil + 2*pi*uavg*topc*rou*(exp(daT*(tao(nl_lake+1)-tao(1)))-exp(-daT*(tao(nl_lake+1)-tao(1))))/D
+            !    ! print*, sum,sabg*(1.-betaprime), 2*pi*uavg*topc*rou*(exp(T*(tao(nl_lake+1)-tao(1)))-exp(-T*(tao(nl_lake+1)-tao(1))))/D
+            ! else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
+            !       ! cause spring convection.
+            !    phi(:) = 0.
+            !    phi_soil = 0.
+            ! end if 
+         ! ENDIF   
+
+         ELSE IF(DEF_USE_TWOSTREAM)THEN
+
+            write(*,*)'twostream' 
+            ! zero aerosol input arrays
+            DO aer = 1, sno_nbr_aer
+               DO i = maxsnl+1, 0
+                  mss_cnc_aer_in(i,aer) = 0._r8
+               ENDDO
+            ENDDO
+            ! write(*,*)'lb before', lb
+            ! write(*,*)'before wice_soisno',wice_soisno(lb)
+            ! write(*,*)'before wliq_soisno',wliq_soisno(lb)
+            ! write(*,*)'before dz_soisno',dz_soisno(lb)
+            if (snl < 0) then 
+               write(*,*)'snowsnl',snl 
+               wice_soisno_snicar(maxsnl+1:nl_soil) = wice_soisno(maxsnl+1:nl_soil)
+               wliq_soisno_snicar(maxsnl+1:nl_soil) = wliq_soisno(maxsnl+1:nl_soil)
+               dz_soisno_snicar(maxsnl+1:nl_soil)   = dz_soisno(maxsnl+1:nl_soil)
+               z_soisno_snicar(maxsnl+1:nl_soil)    = z_soisno(maxsnl+1:nl_soil)
+               zi_soisno_snicar(maxsnl:nl_soil) = zi_soisno(maxsnl:nl_soil)
+               t_soisno_snicar(maxsnl+1:nl_soil)    =t_soisno(maxsnl+1:nl_soil)
+               snl_snicar  = snl
+               scv_snicar  = scv 
+               snowdp_snicar = snowdp
+               qout_snowb = 0.0
+               lb_snicar = snl_snicar + 1
+               ! calculate sublimation, frosting, dewing
+               qseva = 0.
+               qsubl = 0.
+               qsdew = 0.
+               qfros = 0.
+
+               if (fevpg >= 0.0) then
+                  if(lb_snicar < 0)then
+                     qseva = min(wliq_soisno(lb_snicar)/deltim, fevpg)
+                     qsubl = fevpg - qseva
+                  else
+                     qseva = min((1.-lake_icefrac(1))*1000.*dz_lake(1)/deltim, fevpg)
+                     qsubl = fevpg - qseva
+                  endif
+               else
+                  if (t_grnd < tfrz) then
+                     qfros = abs(fevpg)
+                  else
+                     qsdew = abs(fevpg)
+                  end if
+               end if
+               call snowwater_SNICAR (lb_snicar,deltim,ssi,wimp,&
+                         pg_rain,qseva,qsdew,qsubl,qfros,&
+                         dz_soisno_snicar(lb_snicar:0),wice_soisno_snicar(lb_snicar:0),wliq_soisno_snicar(lb_snicar:0),qout_snowb,    &
+                         forc_aer,&
+                         mss_bcpho(lb_snicar:0), mss_bcphi(lb_snicar:0), mss_ocpho(lb_snicar:0), mss_ocphi(lb_snicar:0),&
+                         mss_dst1(lb_snicar:0),  mss_dst2(lb_snicar:0),  mss_dst3(lb_snicar:0),  mss_dst4(lb_snicar:0) )
+               lb_snicar = snl_snicar + 1
+               call snowcompaction (lb_snicar,deltim, &
+                              imelt_soisno(lb_snicar:0),fiold(lb_snicar:0),t_soisno_snicar(lb_snicar:0),&
+                              wliq_soisno_snicar(lb_snicar:0),wice_soisno_snicar(lb_snicar:0),forc_us,forc_vs,dz_soisno_snicar(lb_snicar:0))
+
+         ! Combine thin snow elements
+               lb_snicar = maxsnl + 1
+               call snowlayerscombine_SNICAR (lb_snicar, snl_snicar,&
+                                 z_soisno_snicar(lb_snicar:1),dz_soisno_snicar(lb_snicar:1),zi_soisno_snicar(lb_snicar-1:0),&
+                                 wliq_soisno_snicar(lb_snicar:1),wice_soisno_snicar(lb_snicar:1), t_soisno_snicar(lb_snicar:1),scv_snicar,snowdp_snicar, &
+                                 mss_bcpho(lb_snicar:0), mss_bcphi(lb_snicar:0), mss_ocpho(lb_snicar:0), mss_ocphi(lb_snicar:0),&
+                                 mss_dst1(lb_snicar:0),  mss_dst2(lb_snicar:0),  mss_dst3(lb_snicar:0),  mss_dst4(lb_snicar:0))
+               ! write(*,*)'lb_snicar after', lb_snicar
+               ! write(*,*)'after wice_soisno',wice_soisno(lb)
+               ! write(*,*)'after wliq_soisno',wliq_soisno(lb)
+               ! write(*,*)'after dz_soisno',dz_soisno(lb)
+
+         ! Divide thick snow elements
+               if (snl_snicar < 0) then
+                  call snowlayersdivide_SNICAR (lb_snicar,snl_snicar,z_soisno_snicar(lb:0),dz_soisno_snicar(lb:0),zi_soisno_snicar(lb-1:0),&
+                                 wliq_soisno_snicar(lb:0),wice_soisno_snicar(lb:0),t_soisno_snicar(lb:0)     ,&
+                                 mss_bcpho(lb:0), mss_bcphi(lb:0), mss_ocpho(lb:0), mss_ocphi(lb:0),&
+                                 mss_dst1(lb:0),  mss_dst2(lb:0),  mss_dst3(lb:0),  mss_dst4(lb:0) )
+               endif
+               ! write(*,*)'mss_bcpho',mss_bcpho
+            endif 
+            ! write(*,*)'after wice_soisno',wice_soisno(lb)
+            ! write(*,*)'after wliq_soisno',wliq_soisno(lb)
+            ! write(*,*)'after dz_soisno',dz_soisno(lb)
+            if(lake_icefrac(1)>0) then 
+               write(*,*)'lakeicefrac',lake_icefrac(1)
+            endif
+            ! ss_alb_wtr_avg_cld(:)=(/0.0556923605439147, 0.000143872453054684,&
+            ! 3.88147493245108e-06, 3.51096969783593e-07, 1.64723778561854e-08/) 
+            ! ext_cff_mss_wtr_avg_cld(:) = (/0.117858180005272, 7.08651632540221, 38.4097270605075,&
+            ! 296.897220484403, 1521.60471472379/)   ! ice refractive index
+            write(*,*)'year',idate(1)
+            write(*,*)'day',idate(2)
+            calday = calendarday(idate)
+            coszen=orb_coszen(calday,dlon,dlat)      
+            if (coszen > 0.) then 
+               write(*,*)'coszen',coszen
+               czen=max(coszen,0.001)
+               albg0 = 0.05/(czen+0.15)
+               albg(:,1) = albg0
+               albg(:,2) = 0.1                 !Subin (2012)
+
+               IF(t_grnd < tfrz)THEN           !frozen lake and wetland
+                  albg(1,:) = 0.6
+                  albg(2,:) = 0.4
+               ENDIF
+            else 
+               albg(:,:) = 1.0
+            endif 
+            albsfc   = albg(:,2)
+
+
+            flg_snw_ice = 1
+            snwcp_ice   = 0.0       !excess precipitation due to snow capping [kg m-2 s-1]
+            do_capsnow  = .false.   !true => DO snow capping
+            CALL AerosolMasses( deltim, snl ,do_capsnow ,&
+            wice_soisno(:0),wliq_soisno(:0),snwcp_ice      ,snw_rds       ,&
+
+            mss_bcpho     ,mss_bcphi       ,mss_ocpho      ,mss_ocphi     ,&
+            mss_dst1      ,mss_dst2        ,mss_dst3       ,mss_dst4      ,&
+
+            mss_cnc_bcphi ,mss_cnc_bcpho   ,mss_cnc_ocphi  ,mss_cnc_ocpho ,&
+            mss_cnc_dst1  ,mss_cnc_dst2    ,mss_cnc_dst3   ,mss_cnc_dst4   )
+            mss_cnc_aer_in(:,1) = mss_cnc_bcphi(:)
+            mss_cnc_aer_in(:,2) = mss_cnc_bcpho(:)
+            mss_cnc_aer_in(:,3) = mss_cnc_ocphi(:)
+            mss_cnc_aer_in(:,4) = mss_cnc_ocpho(:)
+            mss_cnc_aer_in(:,5) = mss_cnc_dst1(:)
+            mss_cnc_aer_in(:,6) = mss_cnc_dst2(:)
+            mss_cnc_aer_in(:,7) = mss_cnc_dst3(:)
+            mss_cnc_aer_in(:,8) = mss_cnc_dst4(:)
+            ! DO aer = 1, sno_nbr_aer
+            !    DO i = maxsnl+1, 0
+            !       if (mss_cnc_aer_in(i,aer)/= 0 ) then 
+            !          write(*,*)'mss_cnc_aer_in before change',i,aer,mss_cnc_aer_in(i,aer)
+            !       endif
+            !    ENDDO
+            ! ENDDO
+            snw_rds_in(:) = nint(snw_rds(:))
+            ! write(*,*)'snw_rds_snow',snw_rds_in
+         !    coszen=max(czen,0.001)
+         !--------------------------Define all layer---------------------------------------- 
+            srf_lyr = 0
+            nbr_lyr = nl_lake 
+            do j = 1, nl_lake 
+               if (lake_icefrac(j)>0.and.lake_icefrac(j)<1) then !Mixed ice-water layer
+                  nbr_lyr = nl_lake + 1 
+                  iwin = j ! The interface between ice and water
+               endif 
+            end do 
+            ! lyr_typ(:) = 0. ! 1=snow, 2=ice, 3=water
+            ! allocate(lyr_typ(snl:nbr_lyr))
+            ! lyr_typ(snl:0) = 1 !snow layers
+            ! write (*,*) 'layer1'
+            dziw(:) = 0
+            if (nbr_lyr==10.) then ! no mixed ice-water layer
+               do j = 1,nbr_lyr
+                  dziw(j) = dz_lake(j)! depth of ice or water layer
+               end do
+            elseif (nbr_lyr==11.) then ! mixed ice-water layer
+               do j = 1, nbr_lyr
+                  if( j < iwin ) then ! above interface between ice and water
+                     dziw(j) = dz_lake(j)
+                  elseif ( j == iwin) then ! interface between ice and water
+                     dziw(j) = dz_lake(j)*lake_icefrac(j)
+                     dziw(j+1) = dz_lake(j)*(1-lake_icefrac(j))
+                  elseif (j > iwin+1) then
+                     dziw(j) = dz_lake(j-1)
+                  endif 
+               enddo 
+            endif 
+            ! do i = 1, nbr_lyr
+            !    write (*,*) i,'dziw',dziw(i)
+            ! enddo
+            ! ziw(1) = 0 
+            ziw(:) = 0
+            ziwsum = 0
+            do i = 1, nbr_lyr
+               ziwsum = ziwsum + dziw(i)
+               ziw(i) = ziwsum
+            enddo
+            do i = 1, nbr_lyr
+               if(ziw(i)<=za(idlak)) then 
+                  srf_lyr = i 
+               endif 
+            enddo 
+            write(*,*)'srf_lyr',srf_lyr
+            nl_ice = 0  ! number of ice layers
+            nl_wat = nl_lake !number of water layers
             do j = 1, nl_lake
-               ! extinction coefficient from surface data (1/m), if no eta from surface data,
-               ! set eta, the extinction coefficient, according to L Hakanson, Aquatic Sciences, 1995
-               ! (regression of secchi depth with lake depth for small glacial basin lakes), and the
-               ! Poole & Atkins expression for extinction coeffient of 1.7 / secchi Depth (m).
+            ! write(*,*)'lake_icefrac' ,lake_icefrac(j)
+               if (lake_icefrac(j) == 1.) then
+                  nl_ice = j
+                  nl_wat = nl_lake-j
+               elseif (lake_icefrac(j)>0.and.lake_icefrac(j)<1.) then 
+                  nl_ice = j 
+                  nl_wat = nl_lake-j+1 
+               endif
+            end do 
+            ! if(snl < 0 ) then 
+            !    write(*,*)'snl',snl
+            ! endif
+            if(nl_ice > 0 ) then 
+               write(*,*)'nl_ice',nl_ice
+            endif
+            ! write(*,*)'t_grnd',t_grnd ,' t_lake(1)', t_lake(1) , tfrz
+         !-------------------------------find kfrsnl--------------------------------
+            kfrsnl1 = nbr_lyr+5 !between the last snow layer and the first ice layer or air and ice
+            kfrsnl2 = nbr_lyr+5 !between air and water 
+            kfrsnl3 = nbr_lyr+5 !between the last ice layer and the first water layer
+            kfrsnl4 = nbr_lyr+5 !between air and ice layer
 
-               eta = 1.1925*max(lakedepth,1.)**(-0.424)
-               zin  = z_lake(j) - 0.5*dz_lake(j)
-               zout = z_lake(j) + 0.5*dz_lake(j)
-               rsfin  = exp( -eta*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
-               rsfout = exp( -eta*max( zout-za(idlak),0. ) )  ! is considered fixed at (1-beta)*sabg
-                                                              ! i.e, max(z-za, 0)
-               ! Let rsfout for bottom layer go into soil.
-               ! This looks like it should be robust even for pathological cases,
-               ! like lakes thinner than za(idlak).
+            if (lake_icefrac(1)>0.and.snl==0) then 
+               kfrsnl4 = 1
+            endif
+            if (lake_icefrac(1)>0.and.snl<0) then 
+               kfrsnl1 = 1
+            endif
+            if (lake_icefrac(1)==0.and.snl == 0) then 
+               kfrsnl2 = 1
+            endif       
+            do j = 1, nl_lake-1 
+               if (lake_icefrac(j)>0.and.lake_icefrac(j+1)==0) then
+                  kfrsnl3 = j+1
+               endif
+            end do 
+            write(*,*)'kfrsnl1',kfrsnl1,'kfrsnl2',kfrsnl2,'kfrsnl3',kfrsnl3,'kfrsnl4',kfrsnl4
+            ! Define constants
+            pi = SHR_CONST_PI
+            nint_snw_rds_min = nint(snw_rds_min) 
+            ! nint_snw_rds_max = nint(snw_rds_max) !-----06/13--------
 
-               phi(j) = (rsfin-rsfout) * sabg * (1.-betaprime)
-               if (j == nl_lake) phi_soil = rsfout * sabg * (1.-betaprime)
+            ! always use Delta approximation for snow
+            DELTA = 1
+
+            !Gaussian integration angle and coefficients for diffuse radiation
+            difgauspt(1:8)     & ! gaussian angles (radians)
+                  = (/ 0.9894009_r8,  0.9445750_r8, &
+                     0.8656312_r8,  0.7554044_r8, &
+                     0.6178762_r8,  0.4580168_r8, &
+                     0.2816036_r8,  0.0950125_r8/)
+            difgauswt(1:8)     & ! gaussian weights
+                  = (/ 0.0271525_r8,  0.0622535_r8, &
+                     0.0951585_r8,  0.1246290_r8, &
+                     0.1495960_r8,  0.1691565_r8, &
+                     0.1826034_r8,  0.1894506_r8/)
+
+            snw_shp_lcl(:) = snow_shape_sphere
+            snw_fs_lcl(:)  = 0._r8
+            snw_ar_lcl(:)  = 0._r8
+            atm_type_index = atm_type_mid_latitude_winter
+
+            ! Define snow grain shape
+            if (trim(snow_shape) == 'sphere') then
+                  snw_shp_lcl(:) = snow_shape_sphere
+            elseif (trim(snow_shape) == 'spheroid') then
+                  snw_shp_lcl(:) = snow_shape_spheroid
+            elseif (trim(snow_shape) == 'hexagonal_plate') then
+                  snw_shp_lcl(:) = snow_shape_hexagonal_plate
+            elseif (trim(snow_shape) == 'koch_snowflake') then
+                  snw_shp_lcl(:) = snow_shape_koch_snowflake
+            ! else
+            !       IF (p_is_master) THEN
+            !          write(iulog,*) "snow_shape = ", snow_shape
+            !          call abort
+            !       ENDIF
+            endif
+
+            ! Define atmospheric type
+            if (trim(snicar_atm_type) == 'default') then
+                  atm_type_index = atm_type_default
+            elseif (trim(snicar_atm_type) == 'mid-latitude_winter') then
+                  atm_type_index = atm_type_mid_latitude_winter
+            elseif (trim(snicar_atm_type) == 'mid-latitude_summer') then
+                  atm_type_index = atm_type_mid_latitude_summer
+            elseif (trim(snicar_atm_type) == 'sub-Arctic_winter') then
+                  atm_type_index = atm_type_sub_Arctic_winter
+            elseif (trim(snicar_atm_type) == 'sub-Arctic_summer') then
+                  atm_type_index = atm_type_sub_Arctic_summer
+            elseif (trim(snicar_atm_type) == 'summit_Greenland') then
+                  atm_type_index = atm_type_summit_Greenland
+            elseif (trim(snicar_atm_type) == 'high_mountain') then
+                  atm_type_index = atm_type_high_mountain
+            ! else
+            !       IF (p_is_master) THEN
+            !          write(iulog,*) "snicar_atm_type = ", snicar_atm_type
+            !          call abort
+            !       ENDIF
+            endif
+
+            ! Define ice parameter
+            ice_ri = 3      ! ice refractive index dataset 
+            do i = 1, nbr_lyr
+               if(nbr_lyr==10) then 
+                  rho_snw(1:nbr_lyr) = rhow(:)  ! density for each layer (units: kg/m3)
+               elseif (i <= nl_ice) then 
+                  rho_snw(i) = rhow(i)
+               elseif (i > nl_ice) then
+                  rho_snw(i) = rho_snw(i-1)
+               endif              
+            enddo
+
+
+            ! snw_rds_lcl(1:nbr_lyr)    = 325
+            ! ice_density_wgted = 750  !adjust
+            ! mss_cnc_aer_ice_in = 0._r8
+
+            snw_rds_lcl(1:nbr_lyr)    = air_bubble(3)
+            ice_density_wgted = ice_density(3)  !adjust
+            mss_cnc_aer_ice_in = bc(3)*1.0E-9
+            write(*,*)'ice_properity start'
+            if(nl_ice > 0 ) then 
+               if(idate(1)==2017.and.idate(2)>43 .and.idate(2)<49) then 
+                  snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-43)
+                  ice_density_wgted = ice_density(idate(2)-43)
+                  mss_cnc_aer_ice_in = bc(idate(2)-43)*1.0E-9
+               endif
+            endif
+            ! if(idate(1)==2015.and.idate(2)>327) then 
+            !    snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-327)
+            !    ice_density_wgted = ice_density(idate(2)-327)
+            !    mss_cnc_aer_ice_in = bc(idate(2)-327)*1.0E-9
+            ! endif 
+            ! if(idate(1)==2016.and.idate(2)<119) then 
+            !    snw_rds_lcl(1:nbr_lyr) = air_bubble(365-327+idate(2))
+            !    ice_density_wgted = ice_density(365-327+idate(2))
+            !    mss_cnc_aer_ice_in = bc(365-327+idate(2))*1.0E-9
+            ! endif
+            !  if (idate(1)==2013.and.idate(2)>4.and.idate(2)<88) then 
+            !     snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-4)
+            !     ice_density_wgted = ice_density(idate(2)-4)
+            !     mss_cnc_aer_ice_in = bc(idate(2)-4)*1.0E-9             
+            !  endif
+            ! if (idate(1)==2015.and.idate(2)>342) then 
+            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+343.0)/30.0)*1034.+ &
+            !                            ((idate(2)-343.0)/30.0)*1073.33333333)
+            !    ice_density_wgted = ((30.0-idate(2)+343.0)/30.0)*822.+ &
+            !                         ((idate(2)-343.0)/30.0)*830.5
+            !    mss_cnc_aer_ice_in = ((30.0-idate(2)+343.0)/30.0)*1468.66666667*1.0E-9+ &
+            !                         ((idate(2)-343.0)/30.0)*1314.66666667*1.0E-9
+            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6
+            ! elseif (idate(1)==2016.and.idate(2)<8) then 
+            !    snw_rds_lcl(1:nbr_lyr) = nint(((8.0-idate(2))/30.0)*1034.+ &
+            !                            ((22.0+idate(2))/30.0)*1073.33333333)
+            !    ice_density_wgted = (((8.0-idate(2))/30.0))*822.+ &
+            !                         ((22.0+idate(2))/30.0)*830.5   
+            !    mss_cnc_aer_ice_in = (((8.0-idate(2))/30.0))*1468.66666667*1.0E-9+ &
+            !                         ((22.0+idate(2))/30.0)*1314.66666667*1.0E-9   
+            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6          
+            ! elseif (idate(1)==2016.and.idate(2)>7.and.idate(2)<38) then 
+            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+8.0)/30.0)*1073.33333333+ &
+            !                            ((idate(2)-8.0)/30.0)*899.33333333)
+            !    ice_density_wgted = (((30.0-idate(2)+8.0)/30.0))*830.5 +&
+            !                         ((idate(2)-8.0)/30.0)*822. 
+            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+8.0)/30.0))*1314.66666667*1.0E-9 +&
+            !                         ((idate(2)-8.0)/30.0)*742.66666667*1.0E-9   
+            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6  
+            ! elseif (idate(1)==2016.and.idate(2)>37.and.idate(2)<68) then 
+            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+38.0)/30.0)*899.33333333+ &
+            !                            ((idate(2)-38.0)/30.0)*960.66666667)
+            !    ice_density_wgted = (((30.0-idate(2)+38.0)/30.0))*822.+ &
+            !                         ((idate(2)-38.0)/30.0)*817.  
+            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+38.0)/30.0))*742.66666667*1.0E-9+ &
+            !                         ((idate(2)-38.0)/30.0)*894.*1.0E-9  
+            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6
+            ! elseif (idate(1)==2016.and.idate(2)>67.and.idate(2)<=97) then 
+            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+68.0)/30.0)*960.66666667+ &
+            !                            ((idate(2)-68.0)/30.0)*936.66666667)
+            !    ice_density_wgted = (((30.0-idate(2)+68.0)/30.0))*817.+ &
+            !                         ((idate(2)-68.0)/30.0)*797.5  
+            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+68.0)/30.0))*894.*1.0E-9+ &
+            !                         ((idate(2)-68.0)/30.0)*682.*1.0E-9   
+            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6          
+            ! endif
+            write(*,*)'ice_properity end',snw_rds_lcl(1),ice_density_wgted,mss_cnc_aer_ice_in
+            ! 
+
+            do i=maxsnl+1,nbr_lyr+1,1
+               flx_abs_lcl(:,:)   = 0._r8
+               flx_abs(i,:) = 0._r8
+            enddo
+            do i=1,nbr_lyr,1
+               mss_cnc_aer_lcl(i,:) = 0._r8 
+               mss_cnc_aer_lcl(i,1) = mss_cnc_aer_ice_in
+            enddo
+            ! set snow/ice mass to be used for RT:
+            do flg_slr_in = 1, 2, 1
+               ! write(*,*)'flg_slr_in',flg_slr_in
+               if (flg_snw_ice == 1) then
+                  h2osno_lcl = scv
+               else
+                  h2osno_lcl = wice_soisno(0)
+               endif
+               ! write(*,*) 'before if'
+               ! Qualifier for computing snow RT:
+               !  1) sunlight from atmosphere model
+               !  2) minimum amount of snow on ground.
+               !     Otherwise, set snow albedo to zero
+               ! if ((coszen > 0._r8) .and. (h2osno_lcl > min_snw) ) then
+
+               ! Set variables specific to ELM
+               if (flg_snw_ice == 1) then
+                  ! If there is snow, but zero snow layers, we must create a layer locally.
+                  ! This layer is presumed to have the fresh snow effective radius.
+                  if (snl > -1) then
+                     flg_nosnl         =  1
+                     snl_lcl           =  0
+                     h2osno_ice_lcl(0) =  h2osno_lcl
+                     h2osno_liq_lcl(0) =  0._r8
+                     snw_rds_lcl(0)    =  nint_snw_rds_min
+                  else
+                     flg_nosnl         =  0
+                     snl_lcl           =  snl
+                     h2osno_liq_lcl(maxsnl+1:0) =  wliq_soisno(maxsnl+1:0)
+                     h2osno_ice_lcl(maxsnl+1:0) =  wice_soisno(maxsnl+1:0)
+                     snw_rds_lcl(maxsnl+1:0)    =  snw_rds_in(:)                      
+                  endif
+                  ! write(*,*)'flg_snw_ice == 1'
+
+                  snl_btm   = 0
+                  snl_top   = snl_lcl+1
+                  ! write(*,*)'snl_top_fir',snl_top,snl_lcl
+                  ! Set variables specific to CSIM
+               else
+                  flg_nosnl         = 0
+                  snl_lcl           = -1
+                  h2osno_liq_lcl(maxsnl+1:0) = wliq_soisno(maxsnl+1:0)
+                  h2osno_ice_lcl(maxsnl+1:0) = wice_soisno(maxsnl+1:0)
+                  snw_rds_lcl(maxsnl+1:0)    = snw_rds_in(:)
+                  snl_btm           = 0
+                  snl_top           = 0   
+               endif ! end if flg_snw_ice == 1
+               ! write(*,*) 'end if flg_snw_ice == 1'
+               do i = snl_top,nbr_lyr,1
+                  if (i <= 0) then 
+                     if (snw_rds_lcl(i)<=30) then 
+                        snw_rds_idx(i) = 1
+                     elseif(snw_rds_lcl(i)<=1500) then 
+                        snw_rds_idx(i) = snw_rds_lcl(i)-29
+                     elseif (snw_rds_lcl(i)<=20000)then
+                        snw_rds_idx(i) = int((snw_rds_lcl(i)-1500)/250)+1471
+                     else
+                        snw_rds_idx(i) = 1509
+                     endif 
+                  else 
+                     if (snw_rds_lcl(i)<=10) then 
+                        snw_rds_idx(i) = 1
+                     elseif(snw_rds_lcl(i)<=1500) then 
+                        snw_rds_idx(i) = snw_rds_lcl(i)-9
+                     elseif (snw_rds_lcl(i)<=20000)then 
+                        snw_rds_idx(i) = int((snw_rds_lcl(i)-1500)/250)+1491
+                     else 
+                        snw_rds_idx(i) = 1566
+                     endif                      
+                  endif
+                  ! write(*,*)'snw_rds_idx',i,snw_rds_idx(i)
+               enddo
+               
+#ifdef MODAL_AER
+               !mgf++
+               !
+               ! Assume fixed BC effective radii of 100nm. This is close to
+               ! the effective radius of 95nm (number median radius of
+               ! 40nm) assumed for freshly-emitted BC in MAM.  Future
+               ! implementations may prognose the BC effective radius in
+               ! snow.
+               rds_bcint_lcl(:)  =  100._r8
+               rds_bcext_lcl(:)  =  100._r8
+               !mgf--
+#endif
+               ! write(*,*)'aer'
+               ! Set local aerosol array
+               do j=1,sno_nbr_aer
+                  mss_cnc_aer_lcl(maxsnl+1:0,j) = mss_cnc_aer_in(:,j)
+                  ! write(*,*),'mss_cnc_aer_lcl',j,mss_cnc_aer_lcl(maxsnl+1:0,j)
+               enddo
+               ! write(*,*) 'Set local aerosol array'
+               ! Set spectral underlying surface albedos to their corresponding VIS or NIR albedos
+               albsfc_lcl(1)                       = albsfc(1)
+               albsfc_lcl(nir_bnd_bgn:nir_bnd_end) = albsfc(2)
+
+                  ! Error check for snow grain size:
+                  ! IF (p_is_master) THEN
+                  !    do i=snl_top,snl_btm,1
+                  !    if ((snw_rds_lcl(i) < snw_rds_min_tbl) .or. (snw_rds_lcl(i) > snw_rds_max_tbl)) then
+                  !       write (iulog,*) "SNICAR ERROR: snow grain radius of ", snw_rds_lcl(i), " out of bounds."
+                  !       write (iulog,*) "flg_snw_ice= ", flg_snw_ice
+                  !       write (iulog,*) " level: ", i, " snl(c)= ", snl_lcl
+                  !       write (iulog,*) "h2osno(c)= ", h2osno_lcl
+                  !       call abort
+                  !    endif
+                  !    enddo
+                  ! ENDIF
+               ! Incident flux weighting parameters
+               !  - sum of all VIS bands must equal 1
+               !  - sum of all NIR bands must equal 1
+               !
+               ! Spectral bands (5-band case)
+               !  Band 1: 0.3-0.7um (VIS)
+               !  Band 2: 0.7-1.0um (NIR)
+               !  Band 3: 1.0-1.2um (NIR)
+               !  Band 4: 1.2-1.5um (NIR)
+               !  Band 5: 1.5-5.0um (NIR)
+               !
+               ! The following weights are appropriate for surface-incident flux in a mid-latitude winter atmosphere
+               !
+               ! 3-band weights
+               ! write(*,*)'check atm_type_index',atm_type_index
+               if (numrad_snw==3) then
+                  ! Direct:
+                  if (flg_slr_in == 1) then
+                     flx_wgt(1) = 1._r8
+                     flx_wgt(2) = 0.66628670195247_r8
+                     flx_wgt(3) = 0.33371329804753_r8
+                  ! Diffuse:
+                  elseif (flg_slr_in == 2) then
+                     flx_wgt(1) = 1._r8
+                     flx_wgt(2) = 0.77887652162877_r8
+                     flx_wgt(3) = 0.22112347837123_r8
+                  endif
+
+                  ! 5-band weights
+               elseif(numrad_snw==5) then
+                  ! Direct:
+                  if (flg_slr_in == 1) then
+                     if (atm_type_index == atm_type_default) then
+                        flx_wgt(1) = 1._r8
+                        flx_wgt(2) = 0.49352158521175_r8
+                        flx_wgt(3) = 0.18099494230665_r8
+                        flx_wgt(4) = 0.12094898498813_r8
+                        flx_wgt(5) = 0.20453448749347_r8
+                     else
+                        slr_zen = nint(acos(coszen) * 180._r8 / pi)
+                        if (slr_zen>89) then
+                              slr_zen = 89
+                        endif
+                        ! write(*,*)'in'
+                        flx_wgt(1) = 1._r8
+                        flx_wgt(2) = flx_wgt_dir(atm_type_index, slr_zen+1, 2)
+                        flx_wgt(3) = flx_wgt_dir(atm_type_index, slr_zen+1, 3)
+                        flx_wgt(4) = flx_wgt_dir(atm_type_index, slr_zen+1, 4)
+                        flx_wgt(5) = flx_wgt_dir(atm_type_index, slr_zen+1, 5)
+                     endif
+
+                  ! Diffuse:
+                  elseif (flg_slr_in == 2) then
+                     if  (atm_type_index == atm_type_default) then
+                        flx_wgt(1) = 1._r8
+                        flx_wgt(2) = 0.58581507618433_r8
+                        flx_wgt(3) = 0.20156903770812_r8
+                        flx_wgt(4) = 0.10917889346386_r8
+                        flx_wgt(5) = 0.10343699264369_r8
+                     else
+                        flx_wgt(1) = 1._r8
+                        flx_wgt(2) = flx_wgt_dif(atm_type_index, 2)
+                        flx_wgt(3) = flx_wgt_dif(atm_type_index, 3)
+                        flx_wgt(4) = flx_wgt_dif(atm_type_index, 4)
+                        flx_wgt(5) = flx_wgt_dif(atm_type_index, 5)
+                     endif
+                  endif
+               endif ! end if numrad_snw 
+               write(*,*)'slr_zen',slr_zen
+               ! write(*,*) 'end if numrad_snw '
+               ! Loop over snow spectral bands
+
+               exp_min = exp(-argmax)
+               do bnd_idx = 1,numrad_snw
+               ! note that we can remove flg_dover since this algorithm is
+               ! stable for mu_not > 0.01
+
+               ! mu_not is cosine solar zenith angle above the fresnel level; make
+               ! sure mu_not is large enough for stable and meaningful radiation
+               ! solution: .01 is like sun just touching horizon with its lower edge
+               ! equivalent to mu0 in sea-ice shortwave model ice_shortwave.F90
+                  mu_not = max(coszen, cp01)                  
+                  ! Pre-emptive error handling: aerosols can reap havoc on these absorptive bands.
+                  ! Since extremely high soot concentrations have a negligible effect on these bands, zero them.
+                  if ( (numrad_snw == 5).and.((bnd_idx == 5).or.(bnd_idx == 4)) ) then
+                     mss_cnc_aer_lcl(:,:) = 0._r8
+                  endif
+                  if ( (numrad_snw == 3).and.(bnd_idx == 3) ) then
+                     mss_cnc_aer_lcl(:,:) = 0._r8
+                  endif
+                  ! write(*,*)'aer'
+                  ! Define local Mie parameters based on snow grain size and aerosol species,
+                  !  retrieved from a lookup table.
+                  if (flg_slr_in == 1) then
+                     ! write(*,*)'slr_zen',slr_zen
+                     refindxwat_im(bnd_idx) = refindxwat_im_clr(bnd_idx,slr_zen+1)
+                     refindxwat_re(bnd_idx) = refindxwat_re_clr(bnd_idx,slr_zen+1)
+                     refindx_im(bnd_idx)    = refindx_im_clr(bnd_idx,slr_zen+1)
+                     refindx_re(bnd_idx)    = refindx_re_clr(bnd_idx,slr_zen+1)
+                     FL_r_dif_a(bnd_idx) = FL_r_dif_a_clr(bnd_idx,slr_zen+1)
+                     FL_r_dif_b(bnd_idx) = FL_r_dif_b_clr(bnd_idx,slr_zen+1)
+                     ! write(*,*)'read_rfidx'
+                     do i=snl_top,nbr_lyr,1
+                        ! write(*,*)'nl_ice',nl_ice
+                        ! write(*,*) 'i', i
+                        if (i <=0 ) then     !snow
+                           ss_alb_snw_lcl(i)      = ss_alb_snw_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i))
+                           asm_prm_snw_lcl(i)     = asm_prm_snw_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i))
+                           ext_cff_mss_snw_lcl(i) = ext_cff_mss_snw_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i))
+                           ! write(*,*) 'exist snow dir'
+                           ! write(*,*)i,'ss_alb_snw_lcl',ss_alb_snw_lcl(i)
+                           ! write(*,*)i,'asm_prm_snw_lcl',asm_prm_snw_lcl(i)
+                           ! write(*,*)i,'asm_prm_snw_lcl',asm_prm_snw_lcl(i)
+
+                        else if (nl_ice>0.and.i<=nl_ice) then     !ice
+                           sca_cff_vlm_airbbl_lcl(i) = sca_cff_vlm_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i)) ! +CAW
+                           ! write(*,*)bnd_idx,i,'sca_cff_vlm_airbbl_lcl', sca_cff_vlm_airbbl_lcl(i)
+                           asm_prm_snw_lcl(i)        = asm_prm_ice_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i))     ! +CAW
+                           ! write(*,*)bnd_idx,i,'asm_prm_snw_lcl', asm_prm_snw_lcl(i)
+                           abs_cff_mss_ice_lcl(i)    = abs_cff_mss_avg_clr(bnd_idx,slr_zen+1,snw_rds_idx(i))            ! +CAW
+                           ! write(*,*)bnd_idx,i,'abs_cff_ice',abs_cff_mss_ice_lcl(i)
+                           ! vlm_frac_air(i)           = ( ice_density_wgted -rho_snw(i)  ) / ice_density_wgted         ! +CAW
+                           ! ext_cff_mss_snw_lcl(i)    = ((sca_cff_vlm_airbbl_lcl(i) * &
+                           !          vlm_frac_air(i)) /rho_snw(i)) + abs_cff_mss_ice_lcl(i) ! +CAW
+                           ! ss_alb_snw_lcl(i)         = ((sca_cff_vlm_airbbl_lcl(i) * &
+                           !          vlm_frac_air(i)) /rho_snw(i)) / ext_cff_mss_snw_lcl(i) ! +CAW 
+                           
+                           vlm_frac_air(i)           = ( 917.0 - ice_density_wgted) / 917.0         ! +CAW
+                           ext_cff_mss_snw_lcl(i)    = ((sca_cff_vlm_airbbl_lcl(i) * &
+                                    vlm_frac_air(i)) /ice_density_wgted) + abs_cff_mss_ice_lcl(i) ! +CAW
+                           ss_alb_snw_lcl(i)         = ((sca_cff_vlm_airbbl_lcl(i) * &
+                                    vlm_frac_air(i)) /ice_density_wgted) / ext_cff_mss_snw_lcl(i)  ! +CAW 
+                           ! write(*,*)'vlm_frac_air' ,vlm_frac_air(i)
+                           ! write(*,*)bnd_idx,i,'omega_ice',ss_alb_snw_lcl(i)
+                           ! write(*,*)bnd_idx,i,'ext_cff_ice',ext_cff_mss_snw_lcl(i)
+                           ! write(*,*)bnd_idx,i,'sca_cff_ice',sca_cff_vlm_airbbl_lcl(i)
+                           ! write(*,*)bnd_idx,i,'abs_cff_ice',abs_cff_mss_ice_lcl(i)
+                           ! write(*,*)'direct ext_ice',i,ext_cff_mss_snw_lcl(i),'vlm_frac_air',vlm_frac_air(i),&
+                                    ! 'sca',sca_cff_vlm_airbbl_lcl(i),'abs',abs_cff_mss_ice_lcl(i)
+                           ! write(*,*)i,'ice_density_wgted -rho_snw' ,ice_density_wgted -rho_snw(i)
+                           ! write(*,*)i, 'vlm_frac_air' , vlm_frac_air(i),'ext_cff_mss_snw_lcl'  ,ext_cff_mss_snw_lcl(i),&
+                           !               'ss_alb_snw_lcl' , ss_alb_snw_lcl(i)                   
+                           ! write(*,*) 'exist ice dir'
+                        else    !water
+                           ! write(*,*)'direct water'
+                           ! ss_alb_snw_lcl(i)      = 0.002
+                           ! asm_prm_snw_lcl(i)     = 0.0442765
+                           ! ext_cff_mss_snw_lcl(i) = 0.12/rho_snw(i)
+                           if(bnd_idx == 1) then 
+                              ext_cff_mss_wtr_avg_clr(bnd_idx,:) = 0.314
+                              ss_alb_wtr_avg_clr(bnd_idx,slr_zen+1) = 0.001/0.314
+                           endif 
+                           ss_alb_snw_lcl(i)      = ss_alb_wtr_avg_clr(bnd_idx,slr_zen+1)
+                           asm_prm_snw_lcl(i)     = 0.0442765
+                           ext_cff_mss_snw_lcl(i) = ext_cff_mss_wtr_avg_clr(bnd_idx,slr_zen+1)
+                           ! write(*,*) 'water dir'
+                           ! write(*,*)'water ext_cff',i,bnd_idx,ext_cff_mss_snw_lcl(i) 
+                        endif             
+                        ! write(*,*)i,bnd_idx,'ss_alb_snw_lcl',ss_alb_snw_lcl(i),'asm_prm_snw_lcl',asm_prm_snw_lcl(i), &
+                        ! 'ext_cff_mss_snw_lcl',ext_cff_mss_snw_lcl(i),'refindxwat_im',refindxwat_im(bnd_idx), &
+                        ! 'refindxwat_re',refindxwat_re(bnd_idx), 'refindx_im',refindx_im(bnd_idx),&
+                        ! 'refindx_re',refindx_re(bnd_idx),'FL_r_dif_a',FL_r_dif_a(bnd_idx),'FL_r_dif_b',FL_r_dif_b(bnd_idx)
+                     enddo
+
+                     ! write(*,*)'read dir iops'
+                  elseif (flg_slr_in == 2) then
+                     refindx_im(bnd_idx)    = refindx_im_cld(bnd_idx)
+                     refindx_re(bnd_idx)    = refindx_re_cld(bnd_idx)
+                     refindxwat_im(bnd_idx) = refindxwat_im_cld(bnd_idx)
+                     refindxwat_re(bnd_idx) = refindxwat_re_cld(bnd_idx)
+                     FL_r_dif_a(bnd_idx) = FL_r_dif_a_cld(bnd_idx)
+                     FL_r_dif_b(bnd_idx) = FL_r_dif_b_cld(bnd_idx)
+                     ! write(*,*)'diffuse'
+                     do i=snl_top,nbr_lyr,1
+                        if (i <= 0) then
+                           ss_alb_snw_lcl(i)      = ss_alb_snw_avg(bnd_idx,snw_rds_idx(i))
+                           asm_prm_snw_lcl(i)     = asm_prm_snw_avg(bnd_idx,snw_rds_idx(i))
+                           ext_cff_mss_snw_lcl(i) = ext_cff_mss_snw_avg(bnd_idx,snw_rds_idx(i))
+                           ! write(*,*) 'exist snow dif'
+                           ! write(*,*)i,'ss_alb_snw_lcl',ss_alb_snw_lcl(i)
+                           ! write(*,*)i,'asm_prm_snw_lcl',asm_prm_snw_lcl(i)
+                           ! write(*,*)i,'asm_prm_snw_lcl',asm_prm_snw_lcl(i)
+                        else if (i> 0.and.i<=nl_ice) then                               
+                           sca_cff_vlm_airbbl_lcl(i) = sca_cff_vlm_avg(bnd_idx,snw_rds_idx(i)) ! +CAW
+                           asm_prm_snw_lcl(i)        = asm_prm_ice_avg(bnd_idx,snw_rds_idx(i))     ! +CAW
+                           abs_cff_mss_ice_lcl(i)    = abs_cff_mss_avg(bnd_idx,snw_rds_idx(i))            ! +CAW
+                           ! vlm_frac_air(i)           = (ice_density_wgted-rho_snw(i) ) / ice_density_wgted         ! +CAW
+                           ! ext_cff_mss_snw_lcl(i)    = ((sca_cff_vlm_airbbl_lcl(i) * &
+                           !          vlm_frac_air(i)) /rho_snw(i)) + abs_cff_mss_ice_lcl(i) ! +CAW
+                           ! ss_alb_snw_lcl(i)         = ((sca_cff_vlm_airbbl_lcl(i) * &
+                           !          vlm_frac_air(i)) /rho_snw(i)) / ext_cff_mss_snw_lcl(i) ! +CAW 
+                           vlm_frac_air(i)           = (917.0-ice_density_wgted) / 917.0         ! +CAW
+                           ext_cff_mss_snw_lcl(i)    = ((sca_cff_vlm_airbbl_lcl(i) * &
+                                    vlm_frac_air(i)) /ice_density_wgted) + abs_cff_mss_ice_lcl(i) ! +CAW
+                           ss_alb_snw_lcl(i)         = ((sca_cff_vlm_airbbl_lcl(i) * &
+                                    vlm_frac_air(i)) /ice_density_wgted) / ext_cff_mss_snw_lcl(i) ! +CAW 
+                           ! write(*,*)'diffuse ext_ice',i,ext_cff_mss_snw_lcl(i),'vlm_frac_air',vlm_frac_air(i),&
+                           ! 'sca',sca_cff_vlm_airbbl_lcl(i),'abs',abs_cff_mss_ice_lcl(i)
+                           ! write(*,*)i,'ice_density_wgted -rho_snw' ,ice_density_wgted -rho_snw(i)
+                           ! write(*,*)i, 'vlm_frac_air' , vlm_frac_air(i),'ext_cff_mss_snw_lcl'  ,ext_cff_mss_snw_lcl(i),&
+                           !                'ss_alb_snw_lcl' , ss_alb_snw_lcl(i)   
+                           ! write(*,*) 'exist ice dif'
+                        else    !water
+                           ! write(*,*)'diffuse water'
+                           ! ss_alb_snw_lcl(i)      = 0.002
+                           ! asm_prm_snw_lcl(i)     = 0.0442765
+                           ! ext_cff_mss_snw_lcl(i) = 0.12/rho_snw(i)
+                        
+                           if(bnd_idx == 1) then 
+                              ext_cff_mss_wtr_avg_cld(bnd_idx) = 0.314
+                              ss_alb_wtr_avg_cld(bnd_idx) = 0.001/0.314
+                           endif 
+                           ss_alb_snw_lcl(i)      = ss_alb_wtr_avg_cld(bnd_idx)                           
+                           asm_prm_snw_lcl(i)     = 0.0442765
+                           ext_cff_mss_snw_lcl(i) = ext_cff_mss_wtr_avg_cld(bnd_idx)
+                           ! write(*,*)'water ext_cff',i,bnd_idx,ext_cff_mss_snw_lcl(i) 
+                        endif                        
+                        
+                     enddo
+                     ! write(*,*)'read dif iops'
+                  endif  
+                  ! write(*,*)'read iops'
+                  temp1      = (refindx_re(bnd_idx)*refindx_re(bnd_idx))-(refindx_im(bnd_idx)*refindx_im(bnd_idx))+(sin(acos(coszen))*sin(acos(coszen)))
+                  temp2      = (refindx_re(bnd_idx)*refindx_re(bnd_idx))-(refindx_im(bnd_idx)*refindx_im(bnd_idx))-(sin(acos(coszen))*sin(acos(coszen)))
+                  nreal_ice      = (sqrt(2._r8)/2._r8)* sqrt(temp1 + sqrt( (temp2*temp2) + (4*refindx_re(bnd_idx)*refindx_re(bnd_idx)*refindx_im(bnd_idx)*refindx_im(bnd_idx)) ) )
+                  temp1      = (refindxwat_re(bnd_idx)*refindxwat_re(bnd_idx))-(refindxwat_im(bnd_idx)*refindxwat_im(bnd_idx))+(sin(acos(coszen))*sin(acos(coszen)))
+                  temp2      = (refindxwat_re(bnd_idx)*refindxwat_re(bnd_idx))-(refindxwat_im(bnd_idx)*refindxwat_im(bnd_idx))-(sin(acos(coszen))*sin(acos(coszen)))
+                  nreal_wtr  = (sqrt(2._r8)/2._r8)* sqrt(temp1 + sqrt( (temp2*temp2) + (4*refindxwat_re(bnd_idx)*refindxwat_re(bnd_idx)*refindxwat_im(bnd_idx)*refindxwat_im(bnd_idx)) ) )
+                  ! write(*,*)bnd_idx,'nreal_wtr',nreal_wtr  
+
+
+            ! Calculate the asymetry factors under different snow grain shapes
+                  if (snl_top < 0 ) then 
+                     do i=snl_top,0,1
+                        if(snw_shp_lcl(i) == snow_shape_spheroid) then ! spheroid
+                           diam_ice = 2._r8*snw_rds_lcl(i)
+                           if(snw_fs_lcl(i) == 0._r8) then
+                              fs_sphd = 0.929_r8
+                           else
+                              fs_sphd = snw_fs_lcl(i)
+                           endif
+                           fs_hex = 0.788_r8
+                           if(snw_ar_lcl(i) == 0._r8) then
+                              AR_tmp = 0.5_r8
+                           else
+                              AR_tmp = snw_ar_lcl(i)
+                           endif
+                           g_ice_Cg_tmp = g_b0 * ((fs_sphd/fs_hex)**g_b1) * (diam_ice**g_b2)
+                           gg_ice_F07_tmp = g_F07_c0 + g_F07_c1 * AR_tmp + g_F07_c2 * (AR_tmp**2)
+                        elseif(snw_shp_lcl(i) == snow_shape_hexagonal_plate) then ! hexagonal plate
+                           diam_ice = 2._r8*snw_rds_lcl(i)
+                           if(snw_fs_lcl(i) == 0._r8) then
+                              fs_hex0 = 0.788_r8
+                           else
+                              fs_hex0 = snw_fs_lcl(i)
+                           endif
+                           fs_hex = 0.788_r8
+                           if(snw_ar_lcl(i) == 0._r8) then
+                              AR_tmp = 2.5_r8
+                           else
+                              AR_tmp = snw_ar_lcl(i)
+                           endif
+                           g_ice_Cg_tmp = g_b0 * ((fs_hex0/fs_hex)**g_b1) * (diam_ice**g_b2)
+                           gg_ice_F07_tmp = g_F07_p0 + g_F07_p1 * log(AR_tmp) + g_F07_p2 * ((log(AR_tmp))**2)
+                        elseif(snw_shp_lcl(i) == snow_shape_koch_snowflake) then ! Koch snowflake
+                           diam_ice = 2._r8 * snw_rds_lcl(i) /0.544_r8
+                           if(snw_fs_lcl(i) == 0._r8) then
+                              fs_koch = 0.712_r8
+                           else
+                              fs_koch = snw_fs_lcl(i)
+                           endif
+                           fs_hex = 0.788_r8
+                           if(snw_ar_lcl(i) == 0._r8) then
+                              AR_tmp = 2.5_r8
+                           else
+                              AR_tmp = snw_ar_lcl(i)
+                           endif
+                           g_ice_Cg_tmp = g_b0 * ((fs_koch/fs_hex)**g_b1) * (diam_ice**g_b2)
+                           gg_ice_F07_tmp = g_F07_p0 + g_F07_p1 * log(AR_tmp) + g_F07_p2 * ((log(AR_tmp))**2)
+                        endif
+
+                        ! Linear interpolation for calculating the asymetry factor at band_idx.
+                        if(snw_shp_lcl(i) > 1) then
+                           if(bnd_idx == 1) then
+                              g_Cg_intp   = (g_ice_Cg_tmp(2)-g_ice_Cg_tmp(1))/(1.055_r8-0.475_r8)*(0.5_r8-0.475_r8) +g_ice_Cg_tmp(1)
+                              gg_F07_intp = (gg_ice_F07_tmp(2)-gg_ice_F07_tmp(1))/(1.055_r8-0.475_r8)*(0.5_r8-0.475_r8)+gg_ice_F07_tmp(1)
+                           elseif(bnd_idx == 2) then
+                              g_Cg_intp   = (g_ice_Cg_tmp(2)-g_ice_Cg_tmp(1))/(1.055_r8-0.475_r8)*(0.85_r8-0.475_r8)+g_ice_Cg_tmp(1)
+                              gg_F07_intp = (gg_ice_F07_tmp(2)-gg_ice_F07_tmp(1))/(1.055_r8-0.475_r8)*(0.85_r8-0.475_r8)+gg_ice_F07_tmp(1)
+                           elseif(bnd_idx == 3) then
+                              g_Cg_intp   = (g_ice_Cg_tmp(3)-g_ice_Cg_tmp(2))/(1.655_r8-1.055_r8)*(1.1_r8-1.055_r8)&
+                                             +g_ice_Cg_tmp(2)
+                              gg_F07_intp = (gg_ice_F07_tmp(3)-gg_ice_F07_tmp(2))/(1.655_r8-1.055_r8)*(1.1_r8-1.055_r8)&
+                                          +gg_ice_F07_tmp(2)
+                           elseif(bnd_idx == 4) then
+                              g_Cg_intp   = (g_ice_Cg_tmp(3)-g_ice_Cg_tmp(2))/(1.655_r8-1.055_r8)*(1.35_r8-1.055_r8)&
+                                             +g_ice_Cg_tmp(2)
+                              gg_F07_intp = (gg_ice_F07_tmp(3)-gg_ice_F07_tmp(2))/(1.655_r8-1.055_r8)*(1.35_r8-1.055_r8)&
+                                          +gg_ice_F07_tmp(2)
+                           elseif(bnd_idx == 5) then
+                              g_Cg_intp   = (g_ice_Cg_tmp(6)-g_ice_Cg_tmp(5))/(3.75_r8-3.0_r8)*(3.25_r8-3.0_r8)&
+                                             +g_ice_Cg_tmp(5)
+                              gg_F07_intp = (gg_ice_F07_tmp(6)-gg_ice_F07_tmp(5))/(3.75_r8-3.0_r8)*(3.25_r8-3.0_r8)&
+                                          +gg_ice_F07_tmp(5)
+                           endif
+                              g_ice_F07 = gg_F07_intp + (1._r8 - gg_F07_intp) / ss_alb_snw_lcl(i) / 2._r8
+                              g_ice = g_ice_F07 * g_Cg_intp
+                              asm_prm_snw_lcl(i) = g_ice
+                        endif
+
+                        if(asm_prm_snw_lcl(i) > 0.99_r8) then
+                           asm_prm_snw_lcl(i) = 0.99_r8
+                        endif
+                     enddo 
+                  endif   !snl_top < 0
+                  ! write(*,*)'snl_top < 0'
+
+         !H. Wang
+                  ! aerosol species 1 optical properties
+                  ! ss_alb_aer_lcl(1)        = ss_alb_bc1(bnd_idx)
+                  ! asm_prm_aer_lcl(1)       = asm_prm_bc1(bnd_idx)
+                  ! ext_cff_mss_aer_lcl(1)   = ext_cff_mss_bc1(bnd_idx)
+
+                  ! aerosol species 2 optical properties
+                  ! ss_alb_aer_lcl(2)        = ss_alb_bc2(bnd_idx)
+                  ! asm_prm_aer_lcl(2)       = asm_prm_bc2(bnd_idx)
+                  ! ext_cff_mss_aer_lcl(2)   = ext_cff_mss_bc2(bnd_idx)
+         !H. Wang
+                  ! aerosol species 3 optical properties
+                  ss_alb_aer_lcl(3)        = ss_alb_oc1(bnd_idx)
+                  asm_prm_aer_lcl(3)       = asm_prm_oc1(bnd_idx)
+                  ext_cff_mss_aer_lcl(3)   = ext_cff_mss_oc1(bnd_idx)
+
+                  ! aerosol species 4 optical properties
+                  ss_alb_aer_lcl(4)        = ss_alb_oc2(bnd_idx)
+                  asm_prm_aer_lcl(4)       = asm_prm_oc2(bnd_idx)
+                  ext_cff_mss_aer_lcl(4)   = ext_cff_mss_oc2(bnd_idx)
+
+                  ! aerosol species 5 optical properties
+                  ss_alb_aer_lcl(5)        = ss_alb_dst1(bnd_idx)
+                  asm_prm_aer_lcl(5)       = asm_prm_dst1(bnd_idx)
+                  ext_cff_mss_aer_lcl(5)   = ext_cff_mss_dst1(bnd_idx)
+
+                  ! aerosol species 6 optical properties
+                  ss_alb_aer_lcl(6)        = ss_alb_dst2(bnd_idx)
+                  asm_prm_aer_lcl(6)       = asm_prm_dst2(bnd_idx)
+                  ext_cff_mss_aer_lcl(6)   = ext_cff_mss_dst2(bnd_idx)
+
+                  ! aerosol species 7 optical properties
+                  ss_alb_aer_lcl(7)        = ss_alb_dst3(bnd_idx)
+                  asm_prm_aer_lcl(7)       = asm_prm_dst3(bnd_idx)
+                  ext_cff_mss_aer_lcl(7)   = ext_cff_mss_dst3(bnd_idx)
+
+                  ! aerosol species 8 optical properties
+                  ss_alb_aer_lcl(8)        = ss_alb_dst4(bnd_idx)
+                  asm_prm_aer_lcl(8)       = asm_prm_dst4(bnd_idx)
+                  ext_cff_mss_aer_lcl(8)   = ext_cff_mss_dst4(bnd_idx)  
+                  ! write(*,*)'aer'
+                  ! 1. snow and aerosol layer column mass (L_snw, L_aer [kg/m^2])
+                  ! 2. optical Depths (tau_snw, tau_aer)
+                  ! 3. weighted Mie properties (tau, omega, g)
+
+                  ! Weighted Mie parameters of each layer
+                  ! write(*,*)'snl_top',snl_top
+                  do i=snl_top,nl_ice,1
+#ifdef MODAL_AER      
+                     !mgf++ within-ice and external BC optical properties
+                     !
+                     ! Lookup table indices for BC optical properties,
+                     ! dependent on snow grain size and BC particle
+                     ! size.
+
+                     ! valid for 25 < snw_rds < 1625 um:
+                     if (snw_rds_lcl(i) < 125) then
+                        tmp1 = snw_rds_lcl(i)/50
+                        idx_bcint_icerds = nint(tmp1)
+                     elseif (snw_rds_lcl(i) < 175) then
+                        idx_bcint_icerds = 2
+                     else
+                        tmp1 = (snw_rds_lcl(i)/250)+2
+                        idx_bcint_icerds = nint(tmp1)
+                     endif
+
+                     ! valid for 25 < bc_rds < 525 nm
+                     idx_bcint_nclrds = nint(rds_bcint_lcl(i)/50)
+                     idx_bcext_nclrds = nint(rds_bcext_lcl(i)/50)
+
+                     ! check bounds:
+                     if (idx_bcint_icerds < idx_bcint_icerds_min) idx_bcint_icerds = idx_bcint_icerds_min
+                     if (idx_bcint_icerds > idx_bcint_icerds_max) idx_bcint_icerds = idx_bcint_icerds_max
+                     if (idx_bcint_nclrds < idx_bc_nclrds_min) idx_bcint_nclrds = idx_bc_nclrds_min
+                     if (idx_bcint_nclrds > idx_bc_nclrds_max) idx_bcint_nclrds = idx_bc_nclrds_max
+                     if (idx_bcext_nclrds < idx_bc_nclrds_min) idx_bcext_nclrds = idx_bc_nclrds_min
+                     if (idx_bcext_nclrds > idx_bc_nclrds_max) idx_bcext_nclrds = idx_bc_nclrds_max
+
+                     ! retrieve absorption enhancement factor for within-ice BC
+                     enh_fct = bcenh(bnd_idx,idx_bcint_nclrds,idx_bcint_icerds)
+
+                     ! get BC optical properties (moved from above)
+                     ! aerosol species 1 optical properties (within-ice BC)
+                     ss_alb_aer_lcl(1)        = ss_alb_bc1(bnd_idx,idx_bcint_nclrds)
+                     asm_prm_aer_lcl(1)       = asm_prm_bc1(bnd_idx,idx_bcint_nclrds)
+                     ext_cff_mss_aer_lcl(1)   = ext_cff_mss_bc1(bnd_idx,idx_bcint_nclrds)*enh_fct
+
+                     ! aerosol species 2 optical properties (external BC)
+                     ss_alb_aer_lcl(2)        = ss_alb_bc2(bnd_idx,idx_bcext_nclrds)
+                     asm_prm_aer_lcl(2)       = asm_prm_bc2(bnd_idx,idx_bcext_nclrds)
+                     ext_cff_mss_aer_lcl(2)   = ext_cff_mss_bc2(bnd_idx,idx_bcext_nclrds)
+
+#else
+                     ! bulk aerosol treatment (BC optical properties independent
+                     ! of BC and ice grain size)
+                     ! aerosol species 1 optical properties (within-ice BC)
+                     ss_alb_aer_lcl(1)        = ss_alb_bc1(bnd_idx)
+                     asm_prm_aer_lcl(1)       = asm_prm_bc1(bnd_idx)
+                     ext_cff_mss_aer_lcl(1)   = ext_cff_mss_bc1(bnd_idx)
+
+                     ! aerosol species 2 optical properties
+                     ss_alb_aer_lcl(2)        = ss_alb_bc2(bnd_idx)
+                     asm_prm_aer_lcl(2)       = asm_prm_bc2(bnd_idx)
+                     ext_cff_mss_aer_lcl(2)   = ext_cff_mss_bc2(bnd_idx)
+#endif
+
+                     ! Calculate single-scattering albedo for internal mixing of dust-snow
+                     if (use_dust_snow_internal_mixing) then
+                           if (bnd_idx < 4) then
+                              C_dust_total = mss_cnc_aer_lcl(i,5) + mss_cnc_aer_lcl(i,6) &
+                                          + mss_cnc_aer_lcl(i,7) + mss_cnc_aer_lcl(i,8)
+                              C_dust_total = C_dust_total * 1.0E+06_r8
+                              if(C_dust_total > 0._r8) then
+                                 if (flg_slr_in == 1) then
+                                    R_1_omega_tmp = dust_clear_d0(bnd_idx) &
+                                                + dust_clear_d2(bnd_idx)*(C_dust_total**dust_clear_d1(bnd_idx))
+                                 else
+                                    R_1_omega_tmp = dust_cloudy_d0(bnd_idx) &
+                                                + dust_cloudy_d2(bnd_idx)*(C_dust_total**dust_cloudy_d1(bnd_idx))
+                                 endif
+                                 ss_alb_snw_lcl(i) = 1.0_r8 - (1.0_r8 - ss_alb_snw_lcl(i)) *R_1_omega_tmp
+                              endif
+                           endif
+                           do j = 5,8,1
+                              ss_alb_aer_lcl(j)        = 0._r8
+                              asm_prm_aer_lcl(j)       = 0._r8
+                              ext_cff_mss_aer_lcl(j)   = 0._r8
+                           enddo
+                     endif
+                     ! write(*,*)'end aer'
+                     !mgf--
+                     ! write(*,*)i,'tau_snw',tau_snw(i)
+                     ! write(*,*)i,'ss_alb_snw_lcl',ss_alb_snw_lcl(i)
+                     ! write(*,*)i,'asm_prm_snw_lcl',asm_prm_snw_lcl(i)
+                     if (i>0) then 
+                        L_snw(i)   = ice_density_wgted*dziw(i)
+                     else 
+                        L_snw(i)   = h2osno_ice_lcl(i) + h2osno_ice_lcl(i)
+                     endif
+                     ! write(*,*)'L_snw i>0 end'
+                     do j=1,sno_nbr_aer
+                        if (use_dust_snow_internal_mixing .and. (j >= 5)) then
+                           L_aer(i,j)  = 0._r8
+                        else
+                           L_aer(i,j)   = L_snw(i)*mss_cnc_aer_lcl(i,j)
+                        endif
+                        ! if (mss_cnc_aer_lcl(i,j)/= 0 ) then 
+                        !    write(*,*)'mss_cnc_aer_lcl after change',i,j,mss_cnc_aer_lcl(i,j)
+                        ! endif
+                        ! write(*,*)'mss_cnc_aer_lcl',mss_cnc_aer_lcl(i,j)
+                        tau_aer(i,j) = L_aer(i,j)*ext_cff_mss_aer_lcl(j)
+                        ! write(*,*)j,'ext_cff_mss_aer_lcl',ext_cff_mss_aer_lcl(j)
+                     enddo 
+                     if(nl_ice>0) then 
+                        if(i<=nl_ice.and.i>0) then 
+                           L_snw(i)   = ice_density_wgted*dziw(i) - sum(L_aer(i,:))
+                        endif 
+                     endif
+                     ! write(*,*)'L_snw',i,L_snw(i)
+                     ! tau_snw(i) = L_snw(i)*ext_cff_mss_snw_lcl(i)
+
+                     ! write(*,*)i,'h2osno_ice_lcl',h2osno_ice_lcl(i)
+                     ! write(*,*)i,'h2osno_liq_lcl',h2osno_liq_lcl(i)
+                     tau_snw(i) = L_snw(i)*ext_cff_mss_snw_lcl(i)
+                     ! write(*,*)'tau_snw',i,tau_snw(i)
+                     tau_sum   = 0._r8
+                     omega_sum = 0._r8
+                     g_sum     = 0._r8
+
+                     do j=1,sno_nbr_aer
+                        tau_sum    = tau_sum + tau_aer(i,j)
+                        omega_sum  = omega_sum + (tau_aer(i,j)*ss_alb_aer_lcl(j))
+                        g_sum      = g_sum + (tau_aer(i,j)*ss_alb_aer_lcl(j)*asm_prm_aer_lcl(j))
+                     enddo
+                     ! write(*,*)'check sum',tau_sum,omega_sum,g_sum
+                     tau(i)    = tau_sum + tau_snw(i)
+                     omega(i)  = (1/tau(i))*(omega_sum+(ss_alb_snw_lcl(i)*tau_snw(i)))
+                     g(i)      = (1/(tau(i)*omega(i)))*(g_sum+ (asm_prm_snw_lcl(i)*ss_alb_snw_lcl(i)*tau_snw(i)))
+                     ! write(*,*)'tau', i, tau(i)
+                     ! write(*,*)'omega', i, omega(i)
+                     ! write(*,*)'g', i, g(i)
+                  enddo ! endWeighted Mie parameters of each layer  
+                  do i = nl_ice+1,nbr_lyr
+                     L_snw(i)   = rho_snw(i)*dziw(i)
+                     tau_snw(i) = L_snw(i)*ext_cff_mss_snw_lcl(i)
+                     tau(i)    =  tau_snw(i)
+                     omega(i)  = ss_alb_snw_lcl(i)
+                     g(i)      = asm_prm_snw_lcl(i)
+                  enddo  
+
+                  if(flg_slr_in == 1) then
+                     ! do i = snl_top,nbr_lyr
+                     !    write(*,*)'bnd_idx',bnd_idx,i,L_snw(i)
+                     ! enddo 
+                  endif
+                  ! write(*,*)'endWeighted Mie parameters of each layer'
+                  ! DELTA transformations, if requested
+                  if (DELTA == 1) then
+                     do i=snl_top,nbr_lyr,1
+                        g_star(i)     = g(i)/(1+g(i))
+                        omega_star(i) = ((1-(g(i)**2))*omega(i)) / (1-(omega(i)*(g(i)**2)))
+                        tau_star(i)   = (1-(omega(i)*(g(i)**2)))*tau(i)
+                     enddo
+                  else
+                     do i=snl_top,nbr_lyr,1
+                        g_star(i)     = g(i)
+                        omega_star(i) = omega(i)
+                        tau_star(i)   = tau(i)
+                     enddo
+                  endif
+                  ! write(*,*)'DELTA transformations, if requested'
+
+                  ! Begin radiative transfer solver
+                  ! Given input vertical profiles of optical properties, evaluate the
+                  ! monochromatic Delta-Eddington adding-doubling solution
+
+                  ! note that trndir, trntdr, trndif, rupdir, rupdif, rdndif
+                  ! are variables at the layer interface,
+                  ! for snow with layers rangeing from snl_top to snl_btm
+                  ! there are snl_top to snl_btm+1 layer interface
+                  snl_btm_itf = nbr_lyr + 1
+
+                  do i = snl_top,snl_btm_itf,1
+                     trndir(i) = c0
+                     trntdr(i) = c0
+                     trndif(i) = c0
+                     rupdir(i) = c0
+                     rupdif(i) = c0
+                     rdndif(i) = c0
+                  enddo
+                  ! write(*,*)'rupdif1',rupdif
+                  ! write(*,*)'snl_btm_itf'
+                  ! initialize top interface of top layer
+                  trndir(snl_top) = c1
+                  trntdr(snl_top) = c1
+                  trndif(snl_top) = c1
+                  rdndif(snl_top) = c0
+                  ! write(*,*)'snl_top',snl_top
+                  ! begin main level loop
+                  ! for layer interfaces except for the very bottom
+                  ! write(*,*)'nbr_lyr',nbr_lyr
+                  mu0 = mu_not
+                  do i = snl_top,nbr_lyr,1
+                     ! write(*,*)'i',i
+
+                  ! initialize all layer apparent optical properties to 0
+                     rdir  (i) = c0
+                     rdif_a(i) = c0
+                     rdif_b(i) = c0
+                     tdir  (i) = c0
+                     tdif_a(i) = c0
+                     tdif_b(i) = c0
+                     trnlay(i) = c0
+                     ! write(*,*)i,'check',trntdr(i),trmin
+                     if ( i == kfrsnl1.or. i == kfrsnl4) then 
+                        nreal = nreal_ice 
+                        rfidx_re = refindx_re(bnd_idx)
+                        rfidx_im = refindx_im(bnd_idx)
+                     elseif (i == kfrsnl2) then 
+                        nreal = nreal_wtr
+                        rfidx_re = refindxwat_re(bnd_idx)
+                        rfidx_im = refindxwat_im(bnd_idx)
+                     elseif (i == kfrsnl3) then 
+                        nreal = nreal_wtr/nreal_ice
+                        rfidx_re = refindxwat_re(bnd_idx)/refindx_re(bnd_idx)
+                        rfidx_im = refindxwat_im(bnd_idx)/refindx_im(bnd_idx)
+                     endif
+                  ! compute next layer Delta-eddington solution only if total transmission
+                  ! of radiation to the interface just above the layer exceeds trmin.
+
+                     if (trntdr(i) > trmin ) then
+                        ! write(*,*)i,'trntdr(i) > trmin',flg_slr_in
+                        ! calculation over layers with penetrating radiation
+
+                        ! delta-transformed single-scattering properties
+                        ! of this layer
+                        mu0n      = mu0
+                        if( i == kfrsnl1 .or. i == kfrsnl2 .or. i == kfrsnl3.or. i == kfrsnl4) then
+                           ! write(*,*)'in mu0n kfrsnl'
+                           mu0n      = max(cos(asin(sin(acos(mu_not))/nreal)),cp01)
+                        endif
+                        ts = tau_star(i)
+                        ws = omega_star(i)
+                        gs = g_star(i)
+                        ! write(*,*)i,'ts',ts,'ws',ws,'gs',gs
+
+                        ! Delta-Eddington solution expressions
+                        ! write(*,*)'c3*(c1-ws)',c3*(c1-ws)
+                        ! write(*,*)'c1 - ws*gs',c1 - ws*gs
+                        ! write(*,*)'c3*(c1-ws)*(c1 - ws*gs)',c3*(c1-ws)*(c1 - ws*gs)
+                        ! write(*,*)'lm',sqrt(c3*(c1-ws)*(c1 - ws*gs))
+                        lm = sqrt(c3*(c1-ws)*(c1 - ws*gs))  !lm = el(ws,gs)
+                        ! write(*,*)'lm',lm                        
+                        ue = c1p5*(c1 - ws*gs)/lm           !ue = u(ws,gs,lm)
+                        ! write(*,*)'ue',ue
+                        extins = max(exp_min, exp(-lm*ts))
+                        ! write(*,*)'extins',extins
+                        ne = ((ue+c1)*(ue+c1)/extins) - ((ue-c1)*(ue-c1)*extins) !ne = n(ue,extins)
+                        ! write(*,*)'lm ue extins ne',lm,ue,extins,ne
+                        ! first calculation of rdif, tdif using Delta-Eddington formulas
+                        ! rdif_a(k) = (ue+c1)*(ue-c1)*(c1/extins - extins)/ne
+                        rdif_a(i) = (ue**2-c1)*(c1/extins - extins)/ne
+                        tdif_a(i) = c4*ue/ne
+                        ! evaluate rdir,tdir for direct beam
+                        ! trnlay(i) = max(exp_min, exp(-ts/mu0n))
+                        ! write(*,*)'mu0n',mu0n 
+                        ! write(*,*)'ts',ts
+                        trnlay(i) = max(exp_min, exp(-ts/mu0n))
+
+                        ! Delta-Eddington solution expressions
+                        ! alpha(w,uu,gg,e) = p75*w*uu*((c1 + gg*(c1-w))/(c1 - e*e*uu*uu))
+                        ! agamm(w,uu,gg,e) = p5*w*((c1 + c3*gg*(c1-w)*uu*uu)/(c1-e*e*uu*uu))
+                        ! alp = alpha(ws,mu_not,gs,lm)
+                        ! gam = agamm(ws,mu_not,gs,lm)
+                        alp = cp75*ws*mu0n*((c1 + gs*(c1-ws))/(c1 - lm*lm*mu0n*mu0n))
+                        ! write(*,*)'cp75*ws*mu_not',cp75*ws*mu_not
+                        ! write(*,*)'c1 + gs*(c1-ws)',c1 + gs*(c1-ws)
+                        ! write(*,*)'c1 - lm*lm*mu_not*mu_not',c1 - lm*lm*mu_not*mu_not
+                        gam = cp5*ws*((c1 + c3*gs*(c1-ws)*mu0n*mu0n)/(c1-lm*lm*mu0n*mu0n))
+                        ! alp = cp75*ws*mu0n*((c1 + gs*(c1-ws))/(c1 - lm*lm*mu0n*mu0n))
+                        ! gam = cp5*ws*((c1 + c3*gs*(c1-ws)*mu0n*mu0n)/(c1-lm*lm*mu0n*mu0n))
+                        apg = alp + gam
+                        amg = alp - gam
+                        ! write(*,*)'apg',apg,'amg',amg
+                        rdir(i) = apg*rdif_a(i) +  amg*(tdif_a(i)*trnlay(i) - c1)
+                        tdir(i) = apg*tdif_a(i) + (amg* rdif_a(i)-apg+c1)*trnlay(i)
+                        ! write(*,*)i,'flg_slr_in',flg_slr_in,'rdir',i,rdir(i)
+
+                        ! recalculate rdif,tdif using direct angular integration over rdir,tdir,
+                        ! since Delta-Eddington rdif formula is not well-behaved (it is usually
+                        ! biased low and can even be negative); use ngmax angles and gaussian
+                        ! integration for most accuracy:
+                        R1 = rdif_a(i) ! use R1 as temporary
+                        T1 = tdif_a(i) ! use T1 as temporary
+                        swt = c0
+                        smr = c0
+                        smt = c0
+                        do ng=1,ngmax
+                           mu  = difgauspt(ng)
+                           gwt = difgauswt(ng)
+                           swt = swt + mu*gwt
+                           trn = max(exp_min, exp(-ts/mu))
+                           ! alp = alpha(ws,mu,gs,lm)
+                           ! gam = agamm(ws,mu,gs,lm)
+                           alp = cp75*ws*mu*((c1 + gs*(c1-ws))/(c1 - lm*lm*mu*mu))
+                           gam = cp5*ws*((c1 + c3*gs*(c1-ws)*mu*mu)/(c1-lm*lm*mu*mu))
+                           apg = alp + gam
+                           amg = alp - gam
+                           rdr = apg*R1 + amg*T1*trn - amg
+                           tdr = apg*T1 + amg*R1*trn - apg*trn + trn
+                           smr = smr + mu*rdr*gwt
+                           smt = smt + mu*tdr*gwt
+                        enddo      ! ng
+                        rdif_a(i) = smr/swt
+                        tdif_a(i) = smt/swt
+                        ! write(*,*)i,'rdif_a',rdif_a(i),'tdif_a',tdif_a(i)
+                        ! homogeneous layer
+                        rdif_b(i) = rdif_a(i)
+                        tdif_b(i) = tdif_a(i)  
+
+                        if( i == kfrsnl1 .or. i == kfrsnl2 .or. i == kfrsnl3.or. i == kfrsnl4) then
+                           ! write(*,*)'kfrsnl start'
+                           ! compute fresnel reflection and transmission
+                           ! amplitudes for two polarizations: 1=perpendicular
+                           ! and 2=parallel to he plane containing incident,
+                           ! reflected and refracted rays.
+                           ! mu0n      = cos(asin(sin(acos(coszen))/nreal))
+                           ! mu0= mu_not
+
+                           if (isnan(nreal) .or. isnan(mu0n)) then
+                              write(iulog,*) "CAW c",bnd_idx,"NAN"
+                              write(iulog,*) "CAW c",bnd_idx,"mu0n=", mu0n
+                              write(iulog,*) "CAW c",bnd_idx,"nreal=", nreal
+                              write(iulog,*) "CAW c",bnd_idx,"temp2=", temp2
+                              write(iulog,*) "CAW c",bnd_idx,"temp1=", temp1
+                              !   call endrun(decomp_index=c_idx, elmlevel=namec, msg=errmsg(__FILE__, __LINE__))
+                           endif
+                           ! write(*,*)rfidx_re,rfidx_im
+                           ! rfidx = cmplx(rfidx_re, rfidx_im)
+                           ! write(*,*)'rfidx',rfidx
+                           ! critical_angle = asin(rfidx) ! Only the imaginary part is used for asin calculation
+                           ! write(*,*)'critical_angle',critical_angle
+                           ! write(*,*)'real(critical_angle)',real(critical_angle)
+                           ! write(*,*)'acos(mu_not)',acos(mu_not)
+                           ! if (acos(mu_not)<real(critical_angle)) then 
+                           R1 = (mu0 - nreal*mu0n) / &
+                                    (mu0 + nreal*mu0n)
+                           R2 = (nreal*mu0 - mu0n) / &
+                                    (nreal*mu0 + mu0n)
+                           T1 = c2*mu0 / &
+                                    (mu0 + nreal*mu0n)
+                           T2 = c2*mu0 / &
+                                    (nreal*mu0 + mu0n)
+                           ! write(*,*)'R1',R1,R2,T1,T2
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"mu0", mu0
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"mu_not", mu_not
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"mu0n", mu0n
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"R1",R1
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"R2",R2
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"T1",T1
+                        ! write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"T2",T2
+
+
+                           ! unpolarized light for direct beam
+                           Rf_dir_a = cp5 * (R1*R1 + R2*R2)
+                           !Tf_dir_a = cp5 * (T1*T1 + T2*T2)*refindx*mu0n/mu0
+                           Tf_dir_a = cp5 * (T1*T1 + T2*T2)*nreal*mu0n/mu0
+                           
+                           !write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"Rf_dir_a",Rf_dir_a
+                           !write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"Tf_dir_a",Tf_dir_a
+                           ! precalculated diffuse reflectivities and
+                           ! transmissivities for incident radiation above and
+                           ! below fresnel layer, using the direct albedos and
+                           ! accounting for complete internal reflection from
+                           ! below; precalculated because high order number of
+                           ! gaussian points (~256) is required for convergence:
+                           ! else 
+                           !    Rf_dir_a = 0.
+                           !    Tf_dir_a = 1.
+                           ! endif
+                           ! above
+                           !Rf_dif_a = cp063
+                           Rf_dif_a = FL_r_dif_a(bnd_idx)
+                           Tf_dif_a = c1 - Rf_dif_a
+                           ! below
+                           !Rf_dif_b = cp455
+                           Rf_dif_b = FL_r_dif_b(bnd_idx)
+                           Tf_dif_b = c1 - Rf_dif_b
+
+
+                           ! the i = kfrsnl layer properties are updated to
+                           ! combined the fresnel (refractive) layer, always
+                           ! taken to be above he present layer i (i.e. be the
+                           ! top interface):
+                           rintfc   = c1 / (c1-Rf_dif_b*rdif_a(i))
+                           ! write(*,*)i,'kfrsnl_rintfc',rintfc,'bnd_idx',bnd_idx,'flg_slr_in',flg_slr_in
+                           tdir(i)   = Tf_dir_a*tdir(i) + &
+                              Tf_dir_a*rdir(i) * &
+                              Rf_dif_b*rintfc*tdif_a(i)
+                           rdir(i)   = Rf_dir_a + &
+                              Tf_dir_a*rdir(i) * &
+                              rintfc*Tf_dif_b
+                           rdif_a(i) = Rf_dif_a + &
+                              Tf_dif_a*rdif_a(i) * &
+                              rintfc*Tf_dif_b
+                           rdif_b(i) = rdif_b(i) + &
+                              tdif_b(i)*Rf_dif_b * &
+                              rintfc*tdif_a(i)
+                           tdif_a(i) = tdif_a(i)*rintfc*Tf_dif_a
+                           tdif_b(i) = tdif_b(i)*rintfc*Tf_dif_b
+
+                           ! update trnlay to include fresnel transmission
+                           trnlay(i) = Tf_dir_a*trnlay(i)
+                           !write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"layer",i,"tdif_b",tdif_b(i)  
+                           !write(iulog,*) "CAW c",c_idx,"bnd",bnd_idx,"layer",i,"tdif_a",tdif_a(i)                      
+                           ! write(*,*)'flg_slr_in',flg_slr_in,'rdir_kfrsnl',i,rdir(i)
+
+                        endif      ! i = kfrsnl
+                        ! write(*,*)'i = kfrsnl'
+                     endif ! trntdr(k) > trmin
+                     ! write(*,*)'trntdr(k) > trmin'
+
+                     ! Calculate the solar beam transmission, total transmission, and
+                     ! reflectivity for diffuse radiation from below at interface i,
+                     ! the top of the current layer k:
+                     !
+                     !              layers       interface
+                     !
+                     !       ---------------------  i-1
+                     !                i-1
+                     !       ---------------------  i
+                     !                 i
+                     !       ---------------------
+
+                     trndir(i+1) = trndir(i)*trnlay(i)
+                     refkm1      = c1/(c1 - rdndif(i)*rdif_a(i))
+                     tdrrdir     = trndir(i)*rdir(i)
+                     tdndif      = trntdr(i) - trndir(i)
+                     trntdr(i+1) = trndir(i)*tdir(i) + &
+                              (tdndif + tdrrdir*rdndif(i))*refkm1*tdif_a(i)
+                     rdndif(i+1) = rdif_b(i) + &
+                              (tdif_b(i)*rdndif(i)*refkm1*tdif_a(i))
+                     trndif(i+1) = trndif(i)*refkm1*tdif_a(i)
+                     ! write(*,*)'rdndif',i,rdndif(i+1)
+                     ! write(*,*)i,'refkm1',refkm1,'rdif_b',rdif_b(i)
+                     mu0 = mu0n
+                  enddo       ! i    end main level loop
+                  ! write(*,*)'end main level loop'
+                  ! compute reflectivity to direct and diffuse radiation for layers
+                  ! below by adding succesive layers starting from the underlying
+                  ! ground and working upwards:
+                  !
+                  !              layers       interface
+                  !
+                  !       ---------------------  i
+                  !                 i
+                  !       ---------------------  i+1
+                  !                i+1
+                  !       ---------------------
+
+                  ! set the underlying ground albedo == albedo of near-IR
+                  ! unless bnd_idx == 1, for visible
+                  rupdir(snl_btm_itf) = albsfc(2)
+                  rupdif(snl_btm_itf) = albsfc(2)
+                  if (bnd_idx == 1) then
+                     rupdir(snl_btm_itf) = albsfc(1)
+                     rupdif(snl_btm_itf) = albsfc(1)
+                  endif
+                  write(*,*)'albsfc',albsfc
+                  ! write(*,*)'rupdif(snl_btm_itf)',snl_btm_itf,rupdif(snl_btm_itf)
+                  ! write(*,*)'rupdif',rupdif
+                  ! write(*,*)'rdif_b',rdif_b
+
+                  do i=nbr_lyr,snl_top,-1
+                     ! interface scattering
+                     refkp1        = c1/( c1 - rdif_b(i)*rupdif(i+1))
+                     ! write(*,*)'refkp1',refkp1
+                     ! dir from top layer plus exp tran ref from lower layer, interface
+                     ! scattered and tran thru top layer from below, plus diff tran ref
+                     ! from lower layer with interface scattering tran thru top from below
+                     rupdir(i) = rdir(i) &
+                              + (        trnlay(i)  *rupdir(i+1) &
+                              +  (tdir(i)-trnlay(i))*rupdif(i+1))*refkp1*tdif_b(i)
+                     ! dif from top layer from above, plus dif tran upwards reflected and
+                     ! interface scattered which tran top from below
+                     ! write(*,*)'rupdir',i,rupdir(i)
+                     rupdif(i) = rdif_a(i) + tdif_a(i)*rupdif(i+1)*refkp1*tdif_b(i)
+                     ! write(*,*)'rupdif',i,rupdif(i)
+                     ! write(*,*)i,'rupdir',rupdir(i),'rupdif',rupdif(i), &
+                     !          'rdif_a',rdif_a(i),'tdif_a',tdif_a(i),'tdif_b',tdif_b(i),'refkp1',refkp1
+                     ! write(*,*)'rupdir',i,bnd_idx,rupdir(i)   
+                  enddo       ! i
+                  ! write(*,*)'end 3309'
+                  
+                  ! net flux (down-up) at each layer interface from the
+                  ! snow top (i = snl_top) to bottom interface above land (i = snl_btm_itf)
+                  ! the interface reflectivities and transmissivities required
+                  ! to evaluate interface fluxes are returned from solution_dEdd;
+                  ! now compute up and down fluxes for each interface, using the
+                  ! combined layer properties at each interface:
+                  !
+                  !              layers       interface
+                  !
+                  !       ---------------------  i
+                  !                 i
+                  !       ---------------------
+
+                  do i = snl_top, snl_btm_itf
+                     ! interface scattering
+                     refk          = c1/(c1 - rdndif(i)*rupdif(i))
+                     ! write(*,*)'refk',refk
+                     ! write(*,*)'c1 - rdndif(i)*rupdif(i)',c1 - rdndif(i)*rupdif(i)
+                     ! dir tran ref from below times interface scattering, plus diff
+                     ! tran and ref from below times interface scattering
+                     fdirup(i) = (trndir(i)*rupdir(i) + &
+                                       (trntdr(i)-trndir(i))  &
+                                       *rupdif(i))*refk
+                     ! dir tran plus total diff trans times interface scattering plus
+                     ! dir tran with up dir ref and down dif ref times interface scattering
+                     fdirdn(i) = trndir(i) + (trntdr(i) &
+                                    - trndir(i) + trndir(i)  &
+                                    *rupdir(i)*rdndif(i))*refk
+                     ! diffuse tran ref from below times interface scattering
+                     fdifup(i) = trndif(i)*rupdif(i)*refk
+                     ! diffuse tran times interface scattering
+                     fdifdn(i) = trndif(i)*refk
+                     ! write(*,*)i,'fdirup',fdirup(i),'fdirdn',fdirdn(i),'fdifup',fdifup(i),'fdifdn',fdifdn(i)
+                     ! write(*,*)i
+                     ! write(*,*)i
+                     ! write(*,*)i
+                     
+                     ! netflux, down - up
+                     ! dfdir = fdirdn - fdirup
+                     dfdir(i) = trndir(i) &
+                                 + (trntdr(i)-trndir(i)) * (c1 - rupdif(i)) * refk &
+                                 -  trndir(i)*rupdir(i)  * (c1 - rdndif(i)) * refk
+                     if (dfdir(i) < puny) dfdir(i) = c0
+                     ! write(*,*)i,'dfdir',dfdir(i)
+                     ! dfdif = fdifdn - fdifup
+                     dfdif(i) = trndif(i) * (c1 - rupdif(i)) * refk
+                     if (dfdif(i) < puny) dfdif(i) = c0
+                     ! write(*,*)i,'dfdif',dfdif(i)
+                  enddo       ! i
+                  ! write(*,*)'end 3358'
+                  if (flg_slr_in == 1) then 
+                     albedo = rupdir(snl_top)
+                     dftmp = dfdir
+                  else 
+                     albedo = rupdif(snl_top)
+                     dftmp = dfdif 
+                  endif 
+                  albout_lcl(bnd_idx) = albedo
+                  flx_interface_lcl(:,bnd_idx) = dftmp
+                  do i = snl_top, nl_lake 
+                     if (nbr_lyr == 10 .or. i < kfrsnl3-1) then 
+                        F_abs(i) = dftmp(i)-dftmp(i+1)
+                     elseif (i == kfrsnl3-1) then
+                        F_abs(i) = dftmp(i)-dftmp(i+2)
+                     elseif (i > kfrsnl3-1) then
+                        F_abs(i) = dftmp(i+1)-dftmp(i+2)
+                     endif 
+                     flx_abs_lcl(i,bnd_idx) = F_abs(i)                    
+                     ! write(*,*)i,'flx_abs_lcl',flx_abs_lcl(i,bnd_idx)
+                     ! flx_abs_btm(bnd_idx) = dftmp(snl_btm_itf)
+                  enddo
+
+                  if (flg_slr_in == 1) then 
+                     flx_abs_up_lcl(bnd_idx) =(trndir(snl_top)*rupdir(snl_top) + (trntdr(snl_top)-trndir(snl_top))  &
+                                          *rupdif(snl_top))*refk
+                  else
+                     flx_abs_up_lcl(bnd_idx) = trndif(snl_top) *  rupdif(snl_top)* refk 
+                  endif
+                  if (flg_slr_in == 1) then 
+                     flx_abs_dn1_lcl(bnd_idx) =trndir(snl_top) + (trntdr(snl_top) - trndir(snl_top) + trndir(snl_top)  &
+                                       *rupdir(snl_top)*rdndif(snl_top))*refk
+                     flx_abs_dn_lcl(bnd_idx) =trndir(snl_btm_itf) + (trntdr(snl_btm_itf) - trndir(snl_btm_itf) + trndir(snl_btm_itf)  &
+                                       *rupdir(snl_btm_itf)*rdndif(snl_btm_itf))*refk
+                     ! flx_abs_dn_lcl(bnd_idx) = dftmp(snl_btm_itf)
+                  else
+                     flx_abs_dn1_lcl(bnd_idx) = trndif(snl_top)*refk 
+                     flx_abs_dn_lcl(bnd_idx) = trndif(snl_btm_itf)*refk 
+                     ! flx_abs_dn_lcl(bnd_idx) = dftmp(snl_sbtm_itf)
+                  endif 
+                  ! write(*,*)'bnd_idx',bnd_idx,'flg_slr_in',flg_slr_in,'albedo',albedo                  
+                  ! albout_lcl(bnd_idx) = (fdirup(snl_top)+fdifup(snl_top))/(fdirdn(snl_top)+fdifdn(snl_top))
+                  
+               enddo   !bnd_idx
+               ! write(*,*)'end 3402'
+               ! Weight output NIR albedo appropriately
+               albout(1) = albout_lcl(1)
+               flx_sum         = 0._r8
+               do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                  flx_sum = flx_sum + flx_wgt(bnd_idx)*albout_lcl(bnd_idx)
+               enddo
+               albout(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               ! write(*,*)'flg_slr_in',flg_slr_in,'albout',albout(:)
+               flx_abs(:,1) = flx_abs_lcl(:,1)
+               flx_interface(:,1) = flx_interface_lcl(:,1)
+               flx_abs_up(1) = flx_abs_up_lcl(1)
+               flx_abs_dn(1) = flx_abs_dn_lcl(1)
+               flx_abs_dn1(1) = flx_abs_dn1_lcl(1)
+               flx_sum = 0._r8
+               do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                  flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_abs_up_lcl(bnd_idx)
+               enddo
+               flx_abs_up(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               ! write(*,*)'flx_abs_up',flx_abs_up(:),flg_slr_in
+               flx_sum = 0._r8
+               do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                  flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_abs_dn_lcl(bnd_idx)
+               enddo
+               flx_abs_dn(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               flx_sum = 0._r8
+               do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                  flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_abs_dn1_lcl(bnd_idx)
+               enddo
+               flx_abs_dn1(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               do i=snl_top,nl_lake,1
+                  flx_sum = 0._r8
+                  do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                     flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_abs_lcl(i,bnd_idx)
+                  enddo
+                  flx_abs(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+                  !  write(*,*)'sumflx_wgt',sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               enddo
+               do i=snl_top,snl_btm_itf,1
+                  flx_sum = 0._r8
+                  do bnd_idx= nir_bnd_bgn,nir_bnd_end
+                     flx_sum = flx_sum + flx_wgt(bnd_idx)*flx_interface_lcl(i,bnd_idx)
+                  enddo
+                  flx_interface(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+                  !  write(*,*)'sumflx_wgt',sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
+               enddo
+               if (flg_slr_in == 1) then 
+                  flx_absd(:,:) = flx_abs(:,:)
+                  flx_abs_upd(:) = flx_abs_up(:)
+                  flx_abs_dnd(:) = flx_abs_dn(:)
+                  flx_abs_dnd1(:) = flx_abs_dn1(:)
+                  flx_interfaced(:,:) = flx_interface(:,:)
+                  ! write(*,*)'direct_vis',flx_absd(:,1),flx_abs_upd(1),flx_abs_dnd(1)
+                  ! write(*,*)'direct_nir',flx_absd(:,2),flx_abs_upd(2),flx_abs_dnd(2)
+               elseif (flg_slr_in == 2) then 
+                  flx_absi(:,:) = flx_abs(:,:)
+                  flx_abs_upi(:) = flx_abs_up(:)
+                  flx_abs_dni(:) = flx_abs_dn(:)
+                  flx_abs_dni1(:) = flx_abs_dn1(:)
+                  flx_interfacei(:,:) = flx_interface(:,:)
+                  ! write(*,*)'diffuse_vis',flx_absi(:,1),flx_abs_upi(1),flx_abs_dni(1)
+                  ! write(*,*)'diffuse_nir',flx_absi(:,2),flx_abs_upi(2),flx_abs_dni(2)
+               endif
+
+            enddo ! flg_slr_in
+            ! write(*,*)'direct_vis',sum(flx_absd(:,1))+flx_abs_dnd(1),1.*(1.-albout(1))
+            ! write(*,*)'direct_nir',sum(flx_absd(:,2))+flx_abs_dnd(2),1.*(1.-albout(1))
+            ! write(*,*)'diffuse_vis',sum(flx_absi(:,1))+flx_abs_dni(1),1.*(1.-albout(2))
+            ! write(*,*)'diffuse_nir',sum(flx_absi(:,2))+flx_abs_dni(2),1.*(1.-albout(2))
+
+            phi_up = flx_abs_upd(1)*forc_sols+flx_abs_upd(2)*forc_soll &
+                     +flx_abs_upi(1)*forc_solsd+flx_abs_upi(2)*forc_solld
+            phi_down = flx_abs_dnd1(1)*forc_sols+flx_abs_dnd1(2)*forc_soll &
+                     +flx_abs_dni1(1)*forc_solsd+flx_abs_dni1(2)*forc_solld
+            ! write(*,*)'phi_down',phi_down
+            phi_srf = 0 
+            ! if(kfrsnl3<10) then 
+            !    write(*,*)'kfrsnl3-1down',flx_interfaced(kfrsnl3-1,1)*forc_sols+flx_interfaced(kfrsnl3-1,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3-1,1)*forc_solsd+flx_interfacei(kfrsnl3-1,2)*forc_solld
+            !    write(*,*)'kfrsnl3down',flx_interfaced(kfrsnl3,1)*forc_sols+flx_interfaced(kfrsnl3,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3,1)*forc_solsd+flx_interfacei(kfrsnl3,2)*forc_solld
+            !    write(*,*)'kfrsnl3+1down',flx_interfaced(kfrsnl3+1,1)*forc_sols+flx_interfaced(kfrsnl3+1,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3+1,1)*forc_solsd+flx_interfacei(kfrsnl3+1,2)*forc_solld
+            !    write(*,*)'kfrsnl3+2down',flx_interfaced(kfrsnl3+2,1)*forc_sols+flx_interfaced(kfrsnl3+2,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3+2,1)*forc_solsd+flx_interfacei(kfrsnl3+2,2)*forc_solld
+            ! endif
+            if (snl<0.or.lake_icefrac(1)== 1 ) then 
+               phi_srf = flx_absd(snl_top ,1)*forc_sols+flx_absd(snl_top,2)*forc_soll&
+                        +flx_absi(snl_top,1)*forc_solsd+flx_absi(snl_top,2)*forc_solld
+            elseif (srf_lyr == 1) then 
+               phi_srf = flx_absd(srf_lyr,1)*forc_sols+flx_absd(srf_lyr,2)*forc_soll&
+                           +flx_absi(srf_lyr,1)*forc_solsd+flx_absi(srf_lyr,2)*forc_solld
+            elseif(srf_lyr > 1) then 
+               phi_srf_sum = 0
+               do i = 1, srf_lyr
+                  phi_srf_sum = phi_srf_sum + flx_absd(i,1)*forc_sols+flx_absd(i,2)*forc_soll&
+                              +flx_absi(i,1)*forc_solsd+flx_absi(i,2)*forc_solld
+                  phi_srf = phi_srf_sum
+               enddo
+            endif
+            ! write(*,*)'srf',srf_lyr,'phi_srf',phi_srf
+            if(forc_sols+forc_soll+forc_solsd+forc_solld==0) then 
+               srf_prop = 1
+            else
+               srf_prop = phi_srf/(forc_sols+forc_soll+forc_solsd+forc_solld-phi_up)
+            endif
+            ! write(*,*)'srf_prop',srf_prop
+            if(snl<0.or.lake_icefrac(1)==1)then 
+               phi(snl_top) = 0
+               do i = snl_top+1, nl_lake
+                  phi(i) = flx_absd(i,1)*forc_sols+flx_absd(i,2)*forc_soll&
+                           +flx_absi(i,1)*forc_solsd+flx_absi(i,2)*forc_solld
+               enddo
+            else 
+               do i = snl_top, nl_lake
+                  if(i>0.and.i<=srf_lyr) then 
+                     ! write(*,*)'i>0.and.i<=srf_lyr',i
+                     phi(i)= 0 
+                  else 
+                     phi(i) = flx_absd(i,1)*forc_sols+flx_absd(i,2)*forc_soll&
+                           +flx_absi(i,1)*forc_solsd+flx_absi(i,2)*forc_solld
+                  endif 
+               enddo 
+            endif
+            ! write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld
+            ! write(*,*)'innir',forc_soll+forc_solld
+            ! phisum = 0
+            ! do i = snl_top,nl_lake
+            !    phisum = phisum + phi(i)
+            !    write(*,*) 'phi',i, phi(i)
+            ! enddo
+            phi_soil = (flx_abs_dnd(1)*forc_sols+flx_abs_dnd(2)*forc_soll &
+                        +flx_abs_dni(1)*forc_solsd+flx_abs_dni(2)*forc_solld)
+            ! write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld,'sum',phi_up+phi_soil+phisum+phi_srf,&
+            ! 'up',phi_up,'soil',phi_soil,'srf',phi_srf,'sumphi',phisum
+            ! lakealb_vis = albout(1)
+            ! lakealb_nir = albout(2)
+            ! if (flx_abs_dnd1(1)*forc_sols+flx_abs_dnd1(2)*forc_soll/=0.) then 
+            !    lakealb = (flx_abs_upd(1)*forc_sols+flx_abs_upd(2)*forc_soll) / (flx_abs_dnd1(1)*forc_sols+flx_abs_dnd1(2)*forc_soll)              
+            !    write(*,*)'lakealb',lakealb
+            ! endif
+            ! lakealb_direct_vis = 9999.0
+            ! lakealb_direct_nir = 9999.0   
+            ! lakealb_diffuse_vis = 9999.0
+            ! lakealb_diffuse_nir = 9999.0     
+            ! lakealb_direct_shortwave = 9999.0 
+            ! lakealb_diffuse_shortwave = 9999.0    
+            ! write(*,*)'before albedo'      
+            if ( coszen > 0.) then         
+               if (flx_abs_dnd1(1)/=0.) then 
+                  lakealb_direct_vis = flx_abs_upd(1) / flx_abs_dnd1(1)           
+               ! write(*,*)'lakealb_direct_vis',lakealb_direct_vis
+               endif
+               if (flx_abs_dnd1(2)/=0.) then          
+                  lakealb_direct_nir = flx_abs_upd(2) / flx_abs_dnd1(2)      
+               ! write(*,*)'lakealb_direct_nir',lakealb_direct_nir
+               endif
+               if (flx_abs_dni1(1)/=0.) then 
+                  lakealb_diffuse_vis = flx_abs_upi(1) / flx_abs_dni1(1)           
+                  ! write(*,*)'lakealb_diffuse_vis',lakealb_diffuse_vis,albout_lcl(1)
+               endif
+               if (flx_abs_dni1(2)/=0.) then          
+                  lakealb_diffuse_nir = flx_abs_upi(2) / flx_abs_dni1(2)      
+               ! write(*,*)'lakealb_diffuse_nir',lakealb_diffuse_nir
+               endif
+            ! write(*,*)'forc_sols+forc_soll',forc_sols+forc_soll
+            ! if (forc_sols+forc_soll/=0.) then 
+               lakealb_direct_shortwave = lakealb_direct_vis*flx_slr(1, slr_zen+1) + lakealb_direct_nir*(flx_slr(2, slr_zen+1) &
+                                                                                 + flx_slr(3, slr_zen+1) + flx_slr(4, slr_zen+1) &
+                                                                                 + flx_slr(5, slr_zen+1) )         
+               ! write(*,*)'lakealb_direct_shortwave',lakealb_direct_shortwave
+            ! endif
+            ! write(*,*)'forc_solsd+forc_solld',forc_sols+forc_soll
+            ! if (forc_solsd+forc_solld/=0.) then 
+               lakealb_diffuse_shortwave =lakealb_diffuse_vis*0.612938087 + lakealb_diffuse_nir*0.387061913              
+               ! write(*,*)'lakealb_diffuse_shortwave',lakealb_diffuse_shortwave
+            endif
+      
+   ! ======================================================================
+   !*[3] Begin stability iteration and temperature and fluxes calculation
+   ! ======================================================================
+
+
+      ! =====================================
+            ITERATION1 : DO WHILE (iter <= itmax)
+            ! =====================================
+      
+               t_grnd_bef = t_grnd
+      
+               if (t_grnd_bef > tfrz .and. t_lake(1) > tfrz .and. snl == 0) then
+                  tksur = savedtke1       !water molecular conductivity
+                  tsur = t_lake(1)
+                  htvp = hvap
+               else if (snl == 0) then !frozen but no snow layers
+                  tksur = tkice        ! This is an approximation because the whole layer may not be frozen, and it is not
+                                       ! accounting for the physical (but not nominal) expansion of the frozen layer.
+                  tsur = t_lake(1)
+                  htvp = hsub
+               else
+                  ! need to calculate thermal conductivity of the top snow layer
+                  rhosnow = (wice_soisno(lb)+wliq_soisno(lb))/dz_soisno(lb)
+                  tksur = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
+                  tsur = t_soisno(lb)
+                  htvp = hsub
+               end if
+      
+      ! Evaluated stability-dependent variables using moz from prior iteration
+
+               displax = 0.
+               if (DEF_USE_CBL_HEIGHT) then
+                  call moninobuk_leddy(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um, hpbl, &
+                              ustar,fh2m,fq2m,fm10m,fm,fh,fq)
+               else
+                  call moninobuk(forc_hgt_u,forc_hgt_t,forc_hgt_q,displax,z0mg,z0hg,z0qg,obu,um,&
+                              ustar,fh2m,fq2m,fm10m,fm,fh,fq)
+               endif
+      
+      ! Get derivative of fluxes with repect to ground temperature
+
+               ram    = 1./(ustar*ustar/um)
+               rah    = 1./(vonkar/fh*ustar)
+               raw    = 1./(vonkar/fq*ustar)
+               stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
+      
+               ax  = srf_prop*(forc_sols+forc_soll+forc_solsd+forc_solld-phi_up) + emg*forc_frl + 3.*stftg3*t_grnd_bef &
+                     + forc_rhoair*cpair/rah*thm &
+                     - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) &
+                     + tksur*tsur/dzsur
+      
+               bx  = 4.*stftg3 + forc_rhoair*cpair/rah &
+                     + htvp*forc_rhoair/raw*qsatgdT + tksur/dzsur
+      
+               t_grnd = ax/bx
+      
+               !-----------------------------------------------------------------
+               ! h_fin = betaprime*sabg + emg*forc_frl + 3.*stftg3*t_grnd_bef & !
+               !     + forc_rhoair*cpair/rah*thm &                              !
+               !     - htvp*forc_rhoair/raw*(qsatg-qsatgdT*t_grnd_bef - forc_q) !
+               ! h_finDT = 4.*stftg3 + forc_rhoair*cpair/rah &                  !
+               !     + htvp*forc_rhoair/raw*qsatgdT                             !
+               ! del_T_grnd = t_grnd - t_grnd_bef                               !
+               !----------------------------------------------------------------!
+      
+      ! surface fluxes of momentum, sensible and latent
+      ! using ground temperatures from previous time step
+      
+               fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+               fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+      
+               call qsadv(t_grnd,forc_psrf,eg,degdT,qsatg,qsatgdT)
+               dth = thm-t_grnd
+               dqh = forc_q-qsatg
+               tstar = vonkar/fh*dth
+               qstar = vonkar/fq*dqh
+               thvstar = tstar*(1.+0.61*forc_q)+0.61*th*qstar
+               zeta = zldis*vonkar*grav*thvstar/(ustar**2*thv)
+               if(zeta >= 0.) then     !stable
+                  zeta = min(2.,max(zeta,1.e-6))
+               else                    !unstable
+                  zeta = max(-100.,min(zeta,-1.e-6))
+               endif
+               obu = zldis/zeta
+               if(zeta >= 0.)then
+                  um = max(ur,0.1)
+               else
+                  if (DEF_USE_CBL_HEIGHT) then !//TODO: Shaofeng, 2023.05.18
+                     zii = max(5.*forc_hgt_u,hpbl)
+                  endif !//TODO: Shaofeng, 2023.05.18
+                  wc = (-grav*ustar*thvstar*zii/thv)**(1./3.)
+                  wc2 = beta1*beta1*(wc*wc)
+                  um = sqrt(ur*ur+wc2)
+               endif
+      
+               call roughness_lake (snl,t_grnd,t_lake(1),lake_icefrac(1),forc_psrf,&
+                                    cur,ustar,z0mg,z0hg,z0qg)
+      
+               iter = iter + 1
+               del_T_grnd = abs(t_grnd - t_grnd_bef)
+      
+               if(iter .gt. itmin) then
+                  if(del_T_grnd <= dtmin) then
+                     convernum = convernum + 1
+                  end if
+                  if(convernum >= 4) EXIT
+               endif
+         
+            ! ===============================================
+            END DO ITERATION1   ! end of stability iteration
+            ! ===============================================
+      write(*,*)'end of stability iteration'
+      !*----------------------------------------------------------------------
+      !*Zack Subin, 3/27/09
+      !*Since they are now a function of whatever t_grnd was before cooling
+      !*to freezing temperature, then this value should be used in the derivative correction term.
+      !*Allow convection if ground temp is colder than lake but warmer than 4C, or warmer than
+      !*lake which is warmer than freezing but less than 4C.
+            tdmax = tfrz + 4.0
+            if ( (snl < 0 .or. t_lake(1) <= tfrz) .and. t_grnd > tfrz) then
+               t_grnd_bef = t_grnd
+               t_grnd = tfrz
+               fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+               fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+            else if ( (t_lake(1) > t_grnd .and. t_grnd > tdmax) .or. &
+                     (t_lake(1) < t_grnd .and. t_lake(1) > tfrz .and. t_grnd < tdmax) ) then
+                     ! Convective mixing will occur at surface
+               t_grnd_bef = t_grnd
+               t_grnd = t_lake(1)
+               fseng = forc_rhoair*cpair*(t_grnd-thm)/rah
+               fevpg = forc_rhoair*(qsatg+qsatgdT*(t_grnd-t_grnd_bef)-forc_q)/raw
+            end if
+            
+      !*----------------------------------------------------------------------
+      
+      ! net longwave from ground to atmosphere
+            stftg3 = emg*stefnc*t_grnd_bef*t_grnd_bef*t_grnd_bef
+            olrg = (1.-emg)*forc_frl + emg*stefnc*t_grnd_bef**4 + 4.*stftg3*(t_grnd - t_grnd_bef)
+            if (t_grnd > tfrz )then
+            htvp = hvap
+            else
+            htvp = hsub
+            end if
+      
+      !The actual heat flux from the ground interface into the lake, not including the light that penetrates the surface.
+            fgrnd1 = srf_prop*(forc_sols+forc_soll+forc_solsd+forc_solld-phi_up) + forc_frl - olrg - fseng - htvp*fevpg
+      
+            ! January 12, 2023 by Yongjiu Dai
+            IF (DEF_USE_SNICAR .and. .not. present(urban_call)) THEN
+               hs = sabg_lyr(lb) + forc_frl - olrg - fseng - htvp*fevpg
+               dhsdT = 0.0
+            ENDIF
+      
+      !------------------------------------------------------------
+      ! Set up vector r and vectors a, b, c that define tridiagonal matrix
+      ! snow and lake and soil layer temperature
+      !------------------------------------------------------------
+      
+      
+      !------------------------------------------------------------
+      ! Diffusivity and implied thermal "conductivity" = diffusivity * cwat
+      !------------------------------------------------------------
+      
+            do j = 1, nl_lake
+               cv_lake(j) = dz_lake(j) * (cwat*(1.-lake_icefrac(j)) + cice_eff*lake_icefrac(j))
             end do
-         else if (snl == 0) then     !no snow-covered layers, but partially frozen
-             phi(1) = sabg * (1.-betaprime)
-             phi(2:nl_lake) = 0.
-             phi_soil = 0.
-         else   ! snow covered, this should be improved upon; Mironov 2002 suggests that SW can penetrate thin ice and may
-               ! cause spring convection.
-            phi(:) = 0.
-            phi_soil = 0.
-         end if
-
+      
+            call hConductivity_lake(nl_lake,snl,t_grnd,&
+                                    z_lake,t_lake,lake_icefrac,rhow,&
+                                    dlat,ustar,z0mg,lakedepth,depthcrit,tk_lake,savedtke1)
+      
+      !------------------------------------------------------------
+      ! Set the thermal properties of the snow above frozen lake and underlying soil
+      ! and check initial energy content.
+      !------------------------------------------------------------
+      
+            lb = snl+1
+            do i = 1, nl_soil
+               vf_water(i) = wliq_soisno(i)/(dz_soisno(i)*denh2o)
+               vf_ice(i) = wice_soisno(i)/(dz_soisno(i)*denice)
+               CALL soil_hcap_cond(vf_gravels(i),vf_om(i),vf_sand(i),porsl(i),&
+                                    wf_gravels(i),wf_sand(i),k_solids(i),&
+                                    csol(i),dkdry(i),dksatu(i),dksatf(i),&
+                                    BA_alpha(i),BA_beta(i),&
+                                    t_soisno(i),vf_water(i),vf_ice(i),hcap(i),thk(i))
+               cv_soisno(i) = hcap(i)*dz_soisno(i)
+            enddo
+      
+      ! Snow heat capacity and conductivity
+            if(lb <=0 )then
+               do j = lb, 0
+                  cv_soisno(j) = cpliq*wliq_soisno(j) + cpice*wice_soisno(j)
+                  rhosnow = (wice_soisno(j)+wliq_soisno(j))/dz_soisno(j)
+                  thk(j) = tkair + (7.75e-5*rhosnow + 1.105e-6*rhosnow*rhosnow)*(tkice-tkair)
+               enddo
+            endif
+      
+      ! Thermal conductivity at the layer interface
+            do i = lb, nl_soil-1
+      
+      ! the following consideration is try to avoid the snow conductivity
+      ! to be dominant in the thermal conductivity of the interface.
+      ! Because when the distance of bottom snow node to the interfacee
+      ! is larger than that of interface to top soil node,
+      ! the snow thermal conductivity will be dominant, and the result is that
+      ! lees heat tranfer between snow and soil
+      
+      ! modified by Nan Wei, 08/25/2014
+               if (i /= 0) then
+                  tk_soisno(i) = thk(i)*thk(i+1)*(z_soisno(i+1)-z_soisno(i)) &
+                        /(thk(i)*(z_soisno(i+1)-zi_soisno(i))+thk(i+1)*(zi_soisno(i)-z_soisno(i)))
+               else
+                  tk_soisno(i) = thk(i)
+               end if
+            end do
+            tk_soisno(nl_soil) = 0.
+            tktopsoil = thk(1)
+      
+      ! Sum cv_lake*t_lake for energy check
+      ! Include latent heat term, and use tfrz as reference temperature
+      ! to prevent abrupt change in heat content due to changing heat capacity with phase change.
+      
+            ! This will need to be over all soil / lake / snow layers. Lake is below.
+            ocvts = 0.
+            do j = 1, nl_lake
+               ocvts = ocvts + cv_lake(j)*(t_lake(j)-tfrz) + cfus*dz_lake(j)*(1.-lake_icefrac(j))
+            end do
+      
+            ! Now do for soil / snow layers
+            do j = lb, nl_soil
+               ocvts = ocvts + cv_soisno(j)*(t_soisno(j)-tfrz) + hfus*wliq_soisno(j)
+               if (j == 1 .and. scv > 0. .and. j == lb) then
+                  ocvts = ocvts - scv*hfus
+               end if
+            end do
+      
+         ENDIF                                              
+         
       ELSE
 
          do j = 1, nl_lake
@@ -1062,7 +4062,7 @@ MODULE MOD_Lake
             zout = z_lake(j) + 0.5*dz_lake(j)
             rsfin  = exp( -eta*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
             rsfout = exp( -eta*max( zout-za(idlak),0. ) )  ! is considered fixed at (1-beta)*sabg
-                                                           ! i.e, max(z-za, 0)
+                                                            ! i.e, max(z-za, 0)
             ! Let rsfout for bottom layer go into soil.
             ! This looks like it should be robust even for pathological cases,
             ! like lakes thinner than za(idlak).
@@ -1071,11 +4071,11 @@ MODULE MOD_Lake
             if (j == nl_lake) phi_soil = rsfout * sabg_lyr(1) * (1.-betaprime)
          end do
       ENDIF
-
+      
       phix(:) = 0.
-      phix(1:nl_lake) = phi(1:nl_lake)         !lake layer
+      phix(snl+1:nl_lake)= phi(snl+1:nl_lake)         !lake layer
       phix(nl_lake+1) = phi_soil               !top soil layer
-
+   !   write(*,*)'check phix',phix(:) 
       ! Set up interface depths(zx), and temperatures (tx).
 
       do j = lb, nl_lake+nl_soil
@@ -1092,8 +4092,14 @@ MODULE MOD_Lake
          end if
       end do
 
-      tx_bef = tx
 
+
+      tx_bef = tx
+      ! write(*,*)'before Solve for tdsolution'
+      do j = 1, nl_lake 
+         ! write(*,*)j,'t_lake',t_lake(j)
+      enddo
+      
 
 ! Heat capacity and resistance of snow without snow layers (<1cm) is ignored during diffusion,
 ! but its capacity to absorb latent heat may be used during phase change.
@@ -1131,7 +4137,10 @@ MODULE MOD_Lake
          end if
 
       end do
-
+      ! do j = lb, nl_lake+nl_soil
+      !    write(*,*)'cvx',cvx(j)
+      ! enddo
+      
 ! Determine heat diffusion through the layer interface and factor used in computing
 ! tridiagonal matrix and set up vector r and vectors a, b, c that define tridiagonal
 ! matrix and solve system
@@ -1171,7 +4180,7 @@ MODULE MOD_Lake
                endif
             enddo
          else
-            j = 1                                 ! no snow covered top lake layer
+            j = 1                                 ! no snow covered top lak e layer
             dzp  = zx(j+1)-zx(j)
             a(j) = 0.0
             b(j) = 1. + (1.-cnfac)*factx(j)*tkix(j)/dzp
@@ -1195,6 +4204,7 @@ MODULE MOD_Lake
                r(j) = tx_bef(j) - cnfac*factx(j)*fnx(j-1)
             end if
          end do
+         
       ! January 12, 2023
 
       ELSE
@@ -1220,8 +4230,9 @@ MODULE MOD_Lake
                r(j) = tx_bef(j) - cnfac*factx(j)*fnx(j-1)
             end if
          end do
+         ! write(*,*)'fgrnd12',fgrnd1
       ENDIF
-
+      write(*,*)'Solve for tdsolution'
 !------------------------------------------------------------
 ! Solve for tdsolution
 !------------------------------------------------------------
@@ -1230,7 +4241,9 @@ MODULE MOD_Lake
 
          call tridia (nl_sls, a(lb:), b(lb:), c(lb:), r(lb:), tx(lb:))
 
-
+      ! do j = lb, nl_lake+nl_soil
+         ! write(*,*)j,'tx',tx(j),'tx_bef',tx_bef(j)
+      ! enddo
       do j = lb, nl_lake + nl_soil
          jprime = j - nl_lake
          if (j < 1) then               ! snow layer
@@ -1252,7 +4265,11 @@ MODULE MOD_Lake
       trad = (olrg/stefnc)**0.25
 
 ! solar absorption below the surface.
-      fgrnd = sabg + forc_frl - olrg - fseng - htvp*fevpg
+      IF(DEF_USE_TWOSTREAM) THEN
+         fgrnd = forc_sols+forc_soll+forc_solsd+forc_solld - phi_up + forc_frl - olrg - fseng - htvp*fevpg
+      ELSE 
+         fgrnd = sabg + forc_frl - olrg - fseng - htvp*fevpg
+      ENDIF
       taux = -forc_rhoair*forc_us/ram
       tauy = -forc_rhoair*forc_vs/ram
       fsena = fseng
@@ -1285,6 +4302,11 @@ MODULE MOD_Lake
          end if
       end if
 
+      ! write(*,*)'Solve for tdsolution'
+      do j = 1, nl_lake 
+         ! write(*,*)j,'t_lake',t_lake(j)
+      enddo
+
 
 #if(defined CoLMDEBUG)
       ! sum energy content and total energy into lake for energy check. any errors will be from the
@@ -1294,15 +4316,30 @@ MODULE MOD_Lake
       do j = lb, nl_lake + nl_soil
          esum1 = esum1 + (tx(j)-tx_bef(j))*cvx(j)
          esum2 = esum2 + (tx(j)-tfrz)*cvx(j)
+         ! write(*,*)j,'esum',esum1,(tx(j)-tx_bef(j)),(tx(j)-tx_bef(j))*cvx(j)
       end do
+      ! write(*,*)'before esum2',esum2
                            ! fgrnd includes all the solar radiation absorbed in the lake,
-      errsoi = esum1/deltim - fgrnd
+      ! IF(DEF_USE_TWOSTREAM) THEN
+      !    IF (.not. DEF_USE_SNICAR .or. present(urban_call)) THEN
+      !       if (snl == 0) then
+      !          errsoi = esum1/deltim - fgrnd + 2*pi*uavg*topc*rou*(exp(daT*(tao(nl_lake+1)-tao(1)))-exp(-daT*(tao(nl_lake+1)-tao(1))))/D
+      !       else 
+      !          errsoi = esum1/deltim - fgrnd
+      !       end if 
+      !    ELSE 
+      !       errsoi = esum1/deltim - fgrnd + 2*pi*uavg*topc*rou*(exp(daT*(tao(nl_lake+1)-tao(1)))-exp(-daT*(tao(nl_lake+1)-tao(1))))/D
+      !    END IF
+      ! ELSE
+         errsoi = esum1/deltim - fgrnd 
+         ! print*,'errsoi',errsoi
+      ! END IF 
       if(abs(errsoi) > 0.1) then
          write(6,*)'energy conservation error in LAND WATER COLUMN during tridiagonal solution,', &
                    'error (W/m^2):', errsoi, fgrnd
       end if
 #endif
-
+      
 
 !------------------------------------------------------------
 !*[4] Phase change
@@ -1386,6 +4423,76 @@ MODULE MOD_Lake
             xmf = xmf + melt*hfus
          end if
       end do
+
+      ! write(*,*)'before xmf', xmf
+      ! last snow & first lake phase change.
+      if (wice_soisno(0)>0. .and. lake_icefrac(1)<1.) then
+         ap = (t_lake(1) - tfrz) * cv_lake(1)
+         bp = (1.-lake_icefrac(1))*denh2o*dz_lake(1)*hfus
+         ep = (tfrz - t_soisno(0)) * cv_soisno(0)
+         fp = wice_soisno(0)*hfus
+         if(ep >= ap+bp) then 
+            ! write(*,*)'phase 1'
+            melt = (1.0-lake_icefrac(1))*denh2o*dz_lake(1)
+            lake_icefrac(1) = 1.0
+            cv_lake(1) = cv_lake(1) - melt*(cpliq-cpice)
+            t_lake(1)=(cv_lake(1)*tfrz+cv_soisno(0)*t_soisno(0)+ap+bp)/(cv_soisno(0)+cv_lake(1))
+            xmf = xmf - melt*hfus
+            t_soisno(0) = t_lake(1)
+         elseif(ep+fp >= ap+bp) then
+            ! write(*,*)'phase 2'
+            melt = (1.0-lake_icefrac(1))*denh2o*dz_lake(1)
+            lake_icefrac(1)=1.0
+            cv_lake(1) = cv_lake(1) - melt*(cpliq-cpice)
+            t_lake(1)=tfrz
+            xmf = xmf - melt*hfus
+            melt = (ap+bp-ep)/hfus
+            cv_soisno(0) = cv_soisno(0) + melt*(cpliq-cpice) ! update heat capacity
+            t_soisno(0) = t_lake(1)
+            wice_soisno(0) = wice_soisno(0) - melt                                    
+            wliq_soisno(0) = wliq_soisno(0) + melt                                    
+            if (wice_soisno(0) < 1.e-12) wice_soisno(0) = 0. ! prevent tiny residuals 
+            if (wliq_soisno(0) < 1.e-12) wliq_soisno(0) = 0. ! prevent tiny residuals
+            sm = sm + melt/deltim
+            xmf = xmf + melt*hfus
+         elseif(ep+fp >= ap) then
+            ! write(*,*)'phase 3'
+            melt = (ep+fp-ap)/hfus
+            t_lake(1)=tfrz
+            lake_icefrac(1) = lake_icefrac(1) + melt/(denh2o*dz_lake(1))
+            if (lake_icefrac(1) > 1.-1.e-12) lake_icefrac(1) = 1.  ! prevent tiny residuals
+            if (lake_icefrac(1) < 1.e-12)    lake_icefrac(1) = 0.  ! prevent tiny residuals
+            cv_lake(1) = cv_lake(1) - melt*(cpliq-cpice)
+            xmf = xmf - melt*hfus
+            melt = wice_soisno(0)
+            cv_soisno(0) = cv_soisno(0) + melt*(cpliq-cpice) ! update heat capacity
+            t_soisno(0) = tfrz
+            wice_soisno(0) = wice_soisno(0) - melt
+            wliq_soisno(0) = wliq_soisno(0) + melt
+            if (wice_soisno(0) < 1.e-12) wice_soisno(0) = 0. ! prevent tiny residuals 
+            if (wliq_soisno(0) < 1.e-12) wliq_soisno(0) = 0. ! prevent tiny residuals
+            sm = sm + melt/deltim
+            xmf = xmf + melt*hfus
+         else 
+            ! write(*,*)'phase 4'
+            melt = wice_soisno(0)
+            cv_soisno(0) = cv_soisno(0) + melt*(cpliq-cpice)
+            t_soisno(0) = (cv_lake(1)*t_lake(1) + cv_soisno(0)*tfrz - ep - fp)/(cv_lake(1) + cv_soisno(0))
+            wice_soisno(0) = wice_soisno(0) - melt
+            wliq_soisno(0) = wliq_soisno(0) + melt
+            if (wice_soisno(0) < 1.e-12) wice_soisno(0) = 0. ! prevent tiny residuals 
+            if (wliq_soisno(0) < 1.e-12) wliq_soisno(0) = 0. ! prevent tiny residuals
+            sm = sm + melt/deltim
+            xmf = xmf + melt*hfus
+            t_lake(1) = t_soisno(0)
+         endif
+      end if
+      ! write(*,*)'after xmf', xmf
+
+      ! write(*,*)'phase change'
+      do j = 1, nl_lake
+         ! write(*,*)j,'t_lake',t_lake(j)
+      enddo
       !------------------------------------------------------------
 
       IF (DEF_USE_SNICAR .and. .not. present(urban_call)) THEN
@@ -1396,6 +4503,7 @@ MODULE MOD_Lake
             ENDIF
          ENDDO
       ENDIF
+      write(*,*)'end phase change'
 
 #if (defined CoLMDEBUG)
       ! second energy check and water check. now check energy balance before and after phase
@@ -1406,12 +4514,14 @@ MODULE MOD_Lake
       do j = 1, nl_lake
          esum2 = esum2 - (t_lake(j)-tfrz)*cv_lake(j)
       end do
-
+      ! write(*,*)'deltim',deltim
+      ! write(*,*)'lake esum2',esum2
       do j = lb, nl_soil
          esum2 = esum2 - (t_soisno(j)-tfrz)*cv_soisno(j)
       end do
-
+      ! write(*,*)'snowsoil esum2',esum2
       esum2 = esum2 - xmf
+      ! write(*,*)'final esum2',esum2
       errsoi = esum2/deltim
 
       if(abs(errsoi) > 0.1) then
@@ -1419,25 +4529,31 @@ MODULE MOD_Lake
       end if
 
 #endif
-
+      
 !------------------------------------------------------------
 !*[5] Convective mixing: make sure fracice*dz is conserved, heat content c*dz*T is conserved, and
 ! all ice ends up at the top. Done over all lakes even if frozen.
 ! Either an unstable density profile or ice in a layer below an incompletely frozen layer will trigger.
 !------------------------------------------------------------
-
+! write(*,*)'before Convective mixing'
+do j = 1, nl_lake 
+   ! write(*,*)j,'lake_icefrac',lake_icefrac(j),'rhow',rhow(j)
+enddo
       ! recalculate density
       do j = 1, nl_lake
          rhow(j) = (1.-lake_icefrac(j))*1000.*(1.0-1.9549e-05*(abs(t_lake(j)-277.))**1.68) &
                      + lake_icefrac(j)*denice
       end do
-
+      ! write(*,*)'Convective mixing 1'
+      do j = 1, nl_lake 
+         ! write(*,*)j,'rhow',rhow(j)
+      enddo
       do j = 1, nl_lake-1
          qav = 0.
          nav = 0.
          iceav = 0.
 
-         if (rhow(j)>rhow(j+1) .or. (lake_icefrac(j)<1.0 .and. lake_icefrac(j+1)>0.)) then
+         if (rhow(j)>rhow(j+1)+ 1.e-6 .or. (lake_icefrac(j)<1.0 .and. lake_icefrac(j+1)>0.)) then
             do i = 1, j+1
                qav = qav + dz_lake(i)*(t_lake(i)-tfrz) * &
                        ((1. - lake_icefrac(i))*cwat + lake_icefrac(i)*cice_eff)
@@ -1492,7 +4608,15 @@ MODULE MOD_Lake
             end do
          end if
       end do
-
+      
+      ! write(*,*)'Convective mixing'
+      ! do j = 1, nl_lake 
+      !    write(*,*)j,'lake_icefrac',lake_icefrac(j),'rhow',rhow(j)
+      ! enddo
+      ! write(*,*)'Convective mixing'
+      do j = 1, nl_lake 
+         ! write(*,*)j,'t_lake',t_lake(j),'lake_icefrac',lake_icefrac(j),'rhow',rhow(j)
+      enddo
 !------------------------------------------------------------
 !*[6] Re-evaluate thermal properties and sum energy content.
 !------------------------------------------------------------
@@ -1513,9 +4637,20 @@ MODULE MOD_Lake
             ncvts = ncvts - scv*hfus
          end if
       end do
-
-      ! check energy conservation.
-      errsoi = (ncvts-ocvts)/deltim - fgrnd
+      ! IF(DEF_USE_TWOSTREAM) THEN
+      !    IF (.not. DEF_USE_SNICAR .or. present(urban_call)) THEN
+      !       if (snl == 0) then
+      !          errsoi = (ncvts-ocvts)/deltim - fgrnd + 2*pi*uavg*topc*rou*(exp(daT*(tao(nl_lake+1)-tao(1)))-exp(-daT*(tao(nl_lake+1)-tao(1))))/D
+      !       else 
+      !          errsoi = (ncvts-ocvts)/deltim - fgrnd
+      !       end if 
+      !    ELSE 
+      !       errsoi = (ncvts-ocvts)/deltim - fgrnd + 2*pi*uavg*topc*rou*(exp(daT*(tao(nl_lake+1)-tao(1)))-exp(-daT*(tao(nl_lake+1)-tao(1))))/D
+      !    END IF
+      ! ELSE 
+         ! check energy conservation.
+         errsoi = (ncvts-ocvts)/deltim - fgrnd 
+      ! END IF
       if (abs(errsoi) < 0.10) then
          fseng = fseng - errsoi
          fsena = fseng
@@ -1524,8 +4659,7 @@ MODULE MOD_Lake
       else
          print*, "energy conservation error in LAND WATER COLUMN during convective mixing", errsoi,fgrnd,ncvts,ocvts
       end if
-
-
+      ! write(*,*)'check final'
   end subroutine laketem
 
 
@@ -1743,59 +4877,59 @@ MODULE MOD_Lake
       !     not freeze completely. Otherwise, let the snow layers persist and melt by diffusion.
       ! ----------------------------------------------------------
 
-      if (t_lake(1) > tfrz .and. snl < 0 .and. lake_icefrac(1) < 0.001) then ! for unfrozen lake
-         unfrozen = .true.
-      else
-         unfrozen = .false.
-      end if
+      ! if (t_lake(1) > tfrz .and. snl < 0 .and. lake_icefrac(1) < 0.001) then ! for unfrozen lake
+      !    unfrozen = .true.
+      ! else
+      !    unfrozen = .false.
+      ! end if
 
-      sumsnowice = 0.
-      sumsnowliq = 0.
-      heatsum = 0.0
-      do j = snl+1,0
-         if (unfrozen) then
-            sumsnowice = sumsnowice + wice_soisno(j)
-            sumsnowliq = sumsnowliq + wliq_soisno(j)
-            heatsum = heatsum + wice_soisno(j)*cpice*(tfrz-t_soisno(j)) &
-                             + wliq_soisno(j)*cpliq*(tfrz-t_soisno(j))
-         end if
-      end do
+      ! sumsnowice = 0.
+      ! sumsnowliq = 0.
+      ! heatsum = 0.0
+      ! do j = snl+1,0
+      !    if (unfrozen) then
+      !       sumsnowice = sumsnowice + wice_soisno(j)
+      !       sumsnowliq = sumsnowliq + wliq_soisno(j)
+      !       heatsum = heatsum + wice_soisno(j)*cpice*(tfrz-t_soisno(j)) &
+      !                        + wliq_soisno(j)*cpliq*(tfrz-t_soisno(j))
+      !    end if
+      ! end do
 
-      if (unfrozen) then
-         ! changed by weinan as the subroutine newsnow_lake
-         ! Remove snow and subtract the latent heat from the top layer.
+      ! if (unfrozen) then
+      !    ! changed by weinan as the subroutine newsnow_lake
+      !    ! Remove snow and subtract the latent heat from the top layer.
 
-         t_ave = tfrz - heatsum/(sumsnowice*cpice + sumsnowliq*cpliq)
+      !    t_ave = tfrz - heatsum/(sumsnowice*cpice + sumsnowliq*cpliq)
 
-         a = heatsum
-         b = sumsnowice*hfus
-         c = (t_lake(1) - tfrz)*cpliq*denh2o*dz_lake(1)
-         d = denh2o*dz_lake(1)*hfus
+      !    a = heatsum
+      !    b = sumsnowice*hfus
+      !    c = (t_lake(1) - tfrz)*cpliq*denh2o*dz_lake(1)
+      !    d = denh2o*dz_lake(1)*hfus
 
-         ! all snow melt
-           if (c>=a+b)then
-              t_lake(1) = (cpliq*(denh2o*dz_lake(1)*t_lake(1) + (sumsnowice+sumsnowliq)*tfrz) - a - b) / &
-                        (cpliq*(denh2o*dz_lake(1) + sumsnowice+ sumsnowice))
-              sm = sm + scv/deltim
-              scv = 0.
-              snowdp = 0.
-              snl = 0
-        ! lake partially freezing to melt all snow
-           else if(c+d >= a+b)then
-              t_lake(1) = tfrz
-              sm = sm + scv/deltim
-              scv = 0.
-              snowdp = 0.
-              snl = 0
-              lake_icefrac(1) = (a+b-c)/d
+      !    ! all snow melt
+      !      if (c>=a+b)then
+      !         t_lake(1) = (cpliq*(denh2o*dz_lake(1)*t_lake(1) + (sumsnowice+sumsnowliq)*tfrz) - a - b) / &
+      !                   (cpliq*(denh2o*dz_lake(1) + sumsnowice+ sumsnowice))
+      !         sm = sm + scv/deltim
+      !         scv = 0.
+      !         snowdp = 0.
+      !         snl = 0
+      !   ! lake partially freezing to melt all snow
+      !      else if(c+d >= a+b)then
+      !         t_lake(1) = tfrz
+      !         sm = sm + scv/deltim
+      !         scv = 0.
+      !         snowdp = 0.
+      !         snl = 0
+      !         lake_icefrac(1) = (a+b-c)/d
 
-        !  snow do not melt while all lake freezing
-        !    else if(c+d < a) then
-        !     t_lake(1) = (c+d + cpice*(sumsnowice*t_ave+denh2o*dz_lake(1)*tfrz) + cpliq*sumsnowliq*t_ave)/&
-        !                (cpice*(sumsnowice+denh2o*dz_lake(1))+cpliq*sumsnowliq)
-        !     lake_icefrac(1) = 1.0
-            end if
-      end if
+      !   !  snow do not melt while all lake freezing
+      !   !    else if(c+d < a) then
+      !   !     t_lake(1) = (c+d + cpice*(sumsnowice*t_ave+denh2o*dz_lake(1)*tfrz) + cpliq*sumsnowliq*t_ave)/&
+      !   !                (cpice*(sumsnowice+denh2o*dz_lake(1))+cpliq*sumsnowliq)
+      !   !     lake_icefrac(1) = 1.0
+      !       end if
+      ! end if
 
 
       ! ----------------------------------------------------------
@@ -1986,6 +5120,29 @@ MODULE MOD_Lake
             tk_lake(j) = kme(j)*cwat*tkice_eff / ((1.-lake_icefrac(j))*tkice_eff &
                        + kme(j)*cwat*lake_icefrac(j))
          end if
+         ! if ((t_grnd > tfrz .and. t_lake(1) > tfrz .and. snl == 0) ) then
+         !    tmp = -ks*z_lake(j)        ! to avoid underflow computing
+         !    if(tmp < -40.) tmp = -40.  !
+         !    ke = vonkar*ws*z_lake(j)/p0 * exp(tmp) / (1.+37.*ri*ri)
+         !    kme(j) = ke 
+
+         !    fangkm = 1.039e-8_r8 * max(n2,7.5e-5)**(-0.43)  ! Fang & Stefan 1996, citing Ellis et al 1991
+         !    kme(j) = kme(j) + fangkm
+
+         !    if (lakedepth >= depthcrit) then
+         !       kme(j) = kme(j) * mixfact + km   ! Mixing enhancement factor for lake deep than 25m.
+         !    end if
+         !    tk_lake(j) = kme(j)*cwat
+         ! else
+         !    kme(j) = 0.
+         !    fangkm = 1.039e-8 * max(n2,7.5e-5)**(-0.43)
+         !    kme(j) = kme(j) + fangkm
+         !    if (lakedepth >= depthcrit) then
+         !        kme(j) = kme(j) * mixfact + km
+         !    end if
+         !    tk_lake(j) = kme(j)*cwat*tkice_eff / ((1.-lake_icefrac(j))*tkice_eff &
+         !               + kme(j)*cwat*lake_icefrac(j))
+         ! end if
       end do
 
       kme(nl_lake) = kme(nl_lake-1)
@@ -2000,5 +5157,239 @@ MODULE MOD_Lake
 
   end subroutine hConductivity_lake
 
+  !--------------------------------------------------------------------------------------
+  subroutine LakeOptics_init( fsnowoptics, foptd, foptr, ficepro)
+
+   USE MOD_NetCDFSerial
+
+   IMPLICIT NONE
+
+   character(len=256), intent(in) :: fsnowoptics     ! snow optical properties file name
+   character(len=256), intent(in) :: foptd     ! direct optical properties file name
+   character(len=256), intent(in) :: foptr     ! diffuse optical properties file name
+   character(len=256), intent(in) :: ficepro     ! diffuse optical properties file name
+   character(len= 32) :: subname = 'LakeOptics_init' ! subroutine name
+   integer :: atm_type_index                         ! index for atmospheric type
+
+   logical :: readvar  ! determine if variable was read from NetCDF file
+!-----------------------------------------------------------------------
+
+   readvar = .true.
+
+   atm_type_index = atm_type_mid_latitude_winter
+   ! Define atmospheric type
+   if (trim(snicar_atm_type) == 'default') then
+     atm_type_index = atm_type_default
+   elseif (trim(snicar_atm_type) == 'mid-latitude_winter') then
+     atm_type_index = atm_type_mid_latitude_winter
+   elseif (trim(snicar_atm_type) == 'mid-latitude_summer') then
+     atm_type_index = atm_type_mid_latitude_summer
+   elseif (trim(snicar_atm_type) == 'sub-Arctic_winter') then
+     atm_type_index = atm_type_sub_Arctic_winter
+   elseif (trim(snicar_atm_type) == 'sub-Arctic_summer') then
+     atm_type_index = atm_type_sub_Arctic_summer
+   elseif (trim(snicar_atm_type) == 'summit_Greenland') then
+     atm_type_index = atm_type_summit_Greenland
+   elseif (trim(snicar_atm_type) == 'high_mountain') then
+     atm_type_index = atm_type_high_mountain
+   ! else
+   !    IF (p_is_master) THEN
+   !       write(iulog,*) "snicar_atm_type = ", snicar_atm_type
+   !       call abort
+   !    ENDIF
+   endif
+
+   !
+   ! Open optics file:
+   ! IF (p_is_master) THEN
+   !    write(iulog,*) 'Attempting to read snow optical properties .....'
+   !    write(iulog,*) subname,trim(fsnowoptics)
+   ! ENDIF
+
+   ! direct-beam snow and ice Mie parameters:
+   CALL ncio_read_bcast_serial (foptr, 'ss_alb_snw_avg', ss_alb_snw_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'asm_prm_snw_avg', asm_prm_snw_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'ext_cff_mss_snw_avg', ext_cff_mss_snw_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'sca_cff_vlm_avg', sca_cff_vlm_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'asm_prm_ice_avg', asm_prm_ice_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'abs_cff_mss_avg', abs_cff_mss_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'ss_alb_wtr_avg', ss_alb_wtr_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'ext_cff_mss_wtr_avg', ext_cff_mss_wtr_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'sca_cff_wtr_avg', sca_cff_wtr_avg_clr)
+   CALL ncio_read_bcast_serial (foptr, 'R_dif_fa_ice_Pic16_avg', FL_r_dif_a_clr)
+   CALL ncio_read_bcast_serial (foptr, 'R_dif_fb_ice_Pic16_avg', FL_r_dif_b_clr)
+   CALL ncio_read_bcast_serial (foptr, 'flx_slr_avg', flx_slr)
+
+   ! direct-beam ice and water complex refractive index:
+   CALL ncio_read_bcast_serial (foptr, 'rfidx_ice_im_avg_Pic16', refindx_im_clr)
+   CALL ncio_read_bcast_serial (foptr, 'rfidx_ice_re_avg_Pic16', refindx_re_clr)
+   CALL ncio_read_bcast_serial (foptr, 'rfidx_wtr_im_avg', refindxwat_im_clr)
+   CALL ncio_read_bcast_serial (foptr, 'rfidx_wtr_re_avg', refindxwat_re_clr)
+
+   ! diffuse snow and ice Mie parameters
+   CALL ncio_read_bcast_serial (foptd, 'ss_alb_snw_avg', ss_alb_snw_avg)
+   CALL ncio_read_bcast_serial (foptd, 'asm_prm_snw_avg', asm_prm_snw_avg)
+   CALL ncio_read_bcast_serial (foptd, 'ext_cff_mss_snw_avg', ext_cff_mss_snw_avg)
+   CALL ncio_read_bcast_serial (foptd, 'sca_cff_vlm_avg', sca_cff_vlm_avg)
+   CALL ncio_read_bcast_serial (foptd, 'asm_prm_ice_avg', asm_prm_ice_avg)
+   CALL ncio_read_bcast_serial (foptd, 'abs_cff_mss_avg', abs_cff_mss_avg)
+   CALL ncio_read_bcast_serial (foptd, 'ss_alb_wtr_avg', ss_alb_wtr_avg_cld)
+   CALL ncio_read_bcast_serial (foptd, 'ext_cff_mss_wtr_avg', ext_cff_mss_wtr_avg_cld)
+   CALL ncio_read_bcast_serial (foptd, 'sca_cff_wtr_avg', sca_cff_wtr_avg_cld)
+   CALL ncio_read_bcast_serial (foptd, 'R_dif_fa_ice_Pic16_avg', FL_r_dif_a_cld)
+   CALL ncio_read_bcast_serial (foptd, 'R_dif_fb_ice_Pic16_avg', FL_r_dif_b_cld)
+
+   ! direct-beam ice and water complex refractive index:
+   CALL ncio_read_bcast_serial (foptd, 'rfidx_ice_im_avg_Pic16', refindx_im_cld)
+   CALL ncio_read_bcast_serial (foptd, 'rfidx_ice_re_avg_Pic16', refindx_re_cld)
+   CALL ncio_read_bcast_serial (foptd, 'rfidx_wtr_im_avg', refindxwat_im_cld)
+   CALL ncio_read_bcast_serial (foptd, 'rfidx_wtr_re_avg', refindxwat_re_cld) 
+
+   CALL ncio_read_bcast_serial (ficepro, 'ice_density', ice_density) 
+   CALL ncio_read_bcast_serial (ficepro, 'air_bubble', air_bubble) 
+   CALL ncio_read_bcast_serial (ficepro, 'sca_cff', sca_cff) 
+   CALL ncio_read_bcast_serial (ficepro, 'bc', bc) 
+
+   !!! Direct and diffuse flux under different atmospheric conditions
+   ! Direct-beam incident spectral flux:
+   CALL ncio_read_bcast_serial (fsnowoptics, 'flx_wgt_dir', flx_wgt_dir)
+
+   ! Diffuse incident spectral flux:
+   CALL ncio_read_bcast_serial (fsnowoptics, 'flx_wgt_dif', flx_wgt_dif)
+
+#ifdef MODAL_AER
+  ! size-dependent BC parameters and BC enhancement factors
+!   IF (p_is_master) THEN
+!      write(iulog,*) 'Attempting to read optical properties for within-ice BC (modal aerosol treatment) ...'
+!   ENDIF
+  !
+  ! BC species 1 Mie parameters
+  !
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_bc_mam', ss_alb_bc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_bc_mam', asm_prm_bc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_bc_mam', ext_cff_mss_bc1)
+  !
+  ! BC species 2 Mie parameters (identical, before enhancement factors applied)
+  !
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_bc_mam', ss_alb_bc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_bc_mam', asm_prm_bc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_bc_mam', ext_cff_mss_bc2)
+  !
+  ! size-dependent BC absorption enhancement factors for within-ice BC
+  CALL ncio_read_bcast_serial (fsnowoptics, 'bcint_enh_mam', bcenh)
+  !
+#else
+  ! bulk aerosol treatment
+  ! BC species 1 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_bcphil', ss_alb_bc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_bcphil', asm_prm_bc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_bcphil', ext_cff_mss_bc1)
+
+  !
+  ! BC species 2 Mie parameters
+  !
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_bcphob', ss_alb_bc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_bcphob', asm_prm_bc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_bcphob', ext_cff_mss_bc2)
+  !
+#endif
+  !
+  ! OC species 1 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_ocphil', ss_alb_oc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_ocphil', asm_prm_oc1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_ocphil', ext_cff_mss_oc1)
+  !
+  ! OC species 2 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_ocphob', ss_alb_oc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_ocphob', asm_prm_oc2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_ocphob', ext_cff_mss_oc2)
+  !
+  ! dust species 1 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_dust01', ss_alb_dst1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_dust01', asm_prm_dst1)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_dust01', ext_cff_mss_dst1)
+  !
+  ! dust species 2 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_dust02', ss_alb_dst2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_dust02', asm_prm_dst2)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_dust02', ext_cff_mss_dst2)
+  !
+  ! dust species 3 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_dust03', ss_alb_dst3)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_dust03', asm_prm_dst3)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_dust03', ext_cff_mss_dst3)
+  !
+  ! dust species 4 Mie parameters
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ss_alb_dust04', ss_alb_dst4)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'asm_prm_dust04', asm_prm_dst4)
+  CALL ncio_read_bcast_serial (fsnowoptics, 'ext_cff_mss_dust04', ext_cff_mss_dst4)
+  !
+  !
+
+!   IF (p_is_master) THEN
+!      write(iulog,*) 'Successfully read snow optical properties'
+!   ENDIF
+
+
+  ! print some diagnostics:
+!   IF (p_is_master) THEN
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for direct-beam ice, rds=100um: ', &
+!         ss_alb_snw_drc(71,1), ss_alb_snw_drc(71,2), ss_alb_snw_drc(71,3),     &
+!         ss_alb_snw_drc(71,4), ss_alb_snw_drc(71,5)
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for diffuse ice, rds=100um: ',     &
+!         ss_alb_snw_dfs(71,1), ss_alb_snw_dfs(71,2), ss_alb_snw_dfs(71,3),     &
+!         ss_alb_snw_dfs(71,4), ss_alb_snw_dfs(71,5)
+!      if (DO_SNO_OC) then
+!         write (iulog,*) 'SNICAR: Including OC aerosols from snow radiative transfer calculations'
+!      else
+!         write (iulog,*) 'SNICAR: Excluding OC aerosols from snow radiative transfer calculations'
+!      endif
+!   ENDIF
+  !
+! #ifdef MODAL_AER
+! !   IF (p_is_master) THEN
+! !      ! unique dimensionality for modal aerosol optical properties
+! !      write (iulog,*) 'SNICAR: Subset of Mie single scatter albedos for BC: ', &
+! !         ss_alb_bc1(1,1), ss_alb_bc1(1,2), ss_alb_bc1(2,1), ss_alb_bc1(5,1), ss_alb_bc1(1,10), ss_alb_bc2(1,10)
+! !      write (iulog,*) 'SNICAR: Subset of Mie mass extinction coefficients for BC: ', &
+! !         ext_cff_mss_bc2(1,1), ext_cff_mss_bc2(1,2), ext_cff_mss_bc2(2,1), ext_cff_mss_bc2(5,1), ext_cff_mss_bc2(1,10),&
+! !         ext_cff_mss_bc1(1,10)
+! !      write (iulog,*) 'SNICAR: Subset of Mie asymmetry parameters for BC: ', &
+! !         asm_prm_bc1(1,1), asm_prm_bc1(1,2), asm_prm_bc1(2,1), asm_prm_bc1(5,1), asm_prm_bc1(1,10), asm_prm_bc2(1,10)
+! !      write (iulog,*) 'SNICAR: Subset of BC absorption enhancement factors: ', &
+! !         bcenh(1,1,1), bcenh(1,2,1), bcenh(1,1,2), bcenh(2,1,1), bcenh(5,10,1), bcenh(5,1,8), bcenh(5,10,8)
+! !   ENDIF
+! #else
+! !   IF (p_is_master) THEN
+! !      write (iulog,*) 'SNICAR: Mie single scatter albedos for hydrophillic BC: ', &
+! !         ss_alb_bc1(1), ss_alb_bc1(2), ss_alb_bc1(3), ss_alb_bc1(4), ss_alb_bc1(5)
+! !      write (iulog,*) 'SNICAR: Mie single scatter albedos for hydrophobic BC: ', &
+! !         ss_alb_bc2(1), ss_alb_bc2(2), ss_alb_bc2(3), ss_alb_bc2(4), ss_alb_bc2(5)
+! !   ENDIF
+! #endif
+
+!   IF (p_is_master) THEN
+!      if (DO_SNO_OC) then
+!         write (iulog,*) 'SNICAR: Mie single scatter albedos for hydrophillic OC: ', &
+!            ss_alb_oc1(1), ss_alb_oc1(2), ss_alb_oc1(3), ss_alb_oc1(4), ss_alb_oc1(5)
+!         write (iulog,*) 'SNICAR: Mie single scatter albedos for hydrophobic OC: ', &
+!            ss_alb_oc2(1), ss_alb_oc2(2), ss_alb_oc2(3), ss_alb_oc2(4), ss_alb_oc2(5)
+!      endif
+
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for dust species 1: ', &
+!         ss_alb_dst1(1), ss_alb_dst1(2), ss_alb_dst1(3), ss_alb_dst1(4), ss_alb_dst1(5)
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for dust species 2: ', &
+!         ss_alb_dst2(1), ss_alb_dst2(2), ss_alb_dst2(3), ss_alb_dst2(4), ss_alb_dst2(5)
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for dust species 3: ', &
+!         ss_alb_dst3(1), ss_alb_dst3(2), ss_alb_dst3(3), ss_alb_dst3(4), ss_alb_dst3(5)
+!      write (iulog,*) 'SNICAR: Mie single scatter albedos for dust species 4: ', &
+!         ss_alb_dst4(1), ss_alb_dst4(2), ss_alb_dst4(3), ss_alb_dst4(4), ss_alb_dst4(5)
+!      write(iulog,*)
+!   ENDIF
+
+end subroutine LakeOptics_init
+
+
+!-----------------------------------------------------------------------
 
 END MODULE MOD_Lake

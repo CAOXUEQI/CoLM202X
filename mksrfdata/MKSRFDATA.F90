@@ -106,9 +106,12 @@ PROGRAM MKSRFDATA
 
    CALL read_namelist (nlfile)
 
+   print *, "hzlllll, after read_namelist"
+
 #ifdef SinglePoint
 #ifndef URBAN_MODEL
    CALL read_surface_data_single (SITE_fsrfdata, mksrfdata=.true.)
+   print *, "hzlllll, after read_surface_data_single"
 #else
    CALL read_urban_surface_data_single (SITE_fsrfdata, mksrfdata=.true.)
 #endif

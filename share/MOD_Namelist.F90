@@ -192,6 +192,11 @@ MODULE MOD_Namelist
    LOGICAL :: DEF_USE_OZONESTRESS             = .false.
    LOGICAL :: DEF_USE_OZONEDATA               = .false.
 
+   ! ---------option for lake--------------------
+   LOGICAL :: DEF_USE_ORIGINAL                    = .false.
+   LOGICAL :: DEF_USE_ONEBANDICE      = .false.
+   LOGICAL :: DEF_USE_TWOBANDICE = .false.
+   LOGICAL :: DEF_USE_TWOSTREAM                 = .true.   
    ! .true. for running SNICAR model
    logical :: DEF_USE_SNICAR                  = .false.
 
@@ -213,6 +218,9 @@ MODULE MOD_Namelist
 
    CHARACTER(len=256) :: DEF_file_snowoptics = 'null'
    CHARACTER(len=256) :: DEF_file_snowaging  = 'null'
+   CHARACTER(len=256) :: DEF_file_lakeopticsd = 'null'
+   CHARACTER(len=256) :: DEF_file_lakeopticsr = 'null'
+   CHARACTER(len=256) :: DEF_file_lakeicepro = 'null'
 
    ! ----- history -----
    LOGICAL  :: DEF_HISTORY_IN_VECTOR = .false.
@@ -315,6 +323,12 @@ MODULE MOD_Namelist
    ! ----- history variables -----
    TYPE history_var_type
 
+      LOGICAL :: lakealb_direct_vis        = .true.
+      LOGICAL :: lakealb_direct_nir        = .true.
+      LOGICAL :: lakealb_direct_shortwave        = .true.
+      LOGICAL :: lakealb_diffuse_vis        = .true.
+      LOGICAL :: lakealb_diffuse_nir        = .true.
+      LOGICAL :: lakealb_diffuse_shortwave        = .true.
       LOGICAL :: xy_us        = .true.
       LOGICAL :: xy_vs        = .true.
       LOGICAL :: xy_t         = .true.
@@ -780,6 +794,9 @@ CONTAINS
 
          DEF_file_snowoptics,             &
          DEF_file_snowaging ,             &
+         DEF_file_lakeopticsd,            &
+         DEF_file_lakeopticsr,            &
+         DEF_file_lakeicepro,             &
 
          DEF_forcing_namelist,            &
 
@@ -798,7 +815,11 @@ CONTAINS
          DEF_REST_COMPRESS_LEVEL,         &
          DEF_HIST_COMPRESS_LEVEL,         &
          DEF_hist_vars_namelist,          &
-         DEF_hist_vars_out_default
+         DEF_hist_vars_out_default,       &
+         DEF_USE_ORIGINAL,                &
+         DEF_USE_ONEBANDICE,              &
+         DEF_USE_TWOBANDICE,              &
+         DEF_USE_TWOSTREAM
 
       namelist /nl_colm_forcing/ DEF_dir_forcing, DEF_forcing
       namelist /nl_colm_history/ DEF_hist_vars
@@ -975,6 +996,9 @@ CONTAINS
 
          DEF_file_snowoptics = trim(DEF_dir_runtime)//'/snicar/snicar_optics_5bnd_mam_c211006.nc'
          DEF_file_snowaging  = trim(DEF_dir_runtime)//'/snicar/snicar_drdt_bst_fit_60_c070416.nc'
+         DEF_file_lakeopticsr = '/stu01/caoxq18/SNICAR-ADv5/mlw_clr_snwrds_wtr.nc'
+         DEF_file_lakeopticsd = '/stu01/caoxq18/SNICAR-ADv5/mlw_cld_snwrds_wtr.nc'
+         DEF_file_lakeicepro = '/stu01/caoxq18/SNICAR-ADv5/new_edi/trout_bc_processed_data.nc'
 
          IF (.not. DEF_USE_SNICAR) THEN
             IF (DEF_Aerosol_Readin) THEN
@@ -1183,6 +1207,9 @@ CONTAINS
       call mpi_bcast (DEF_USE_SNICAR,        1, mpi_logical,   p_root, p_comm_glb, p_err)
       CALL mpi_bcast (DEF_file_snowoptics, 256, mpi_character, p_root, p_comm_glb, p_err)
       CALL mpi_bcast (DEF_file_snowaging , 256, mpi_character, p_root, p_comm_glb, p_err)
+      CALL mpi_bcast (DEF_file_lakeopticsd, 256, mpi_character, p_root, p_comm_glb, p_err)
+      CALL mpi_bcast (DEF_file_lakeopticsr, 256, mpi_character, p_root, p_comm_glb, p_err)
+      CALL mpi_bcast (DEF_file_lakeicepro, 256, mpi_character, p_root, p_comm_glb, p_err)
 
       call mpi_bcast (DEF_Aerosol_Readin,    1, mpi_logical,   p_root, p_comm_glb, p_err)
       call mpi_bcast (DEF_Aerosol_Clim,      1, mpi_logical,   p_root, p_comm_glb, p_err)
@@ -1239,8 +1266,6 @@ CONTAINS
       CALL mpi_bcast (DEF_forcing%CBL_dtime,          1, mpi_integer,   p_root, p_comm_glb, p_err)
       CALL mpi_bcast (DEF_forcing%CBL_offset,         1, mpi_integer,   p_root, p_comm_glb, p_err)
 
-      CALL mpi_bcast (DEF_file_snowoptics,  256, mpi_character, p_root, p_comm_glb, p_err)
-      CALL mpi_bcast (DEF_file_snowaging,   256, mpi_character, p_root, p_comm_glb, p_err)
 #endif
 
       CALL sync_hist_vars (set_defaults = .true.)
@@ -1269,6 +1294,12 @@ CONTAINS
 
       LOGICAL, intent(in) :: set_defaults
 
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_direct_vis       ,  set_defaults)
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_direct_nir       ,  set_defaults)
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_direct_shortwave       ,  set_defaults)
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_diffuse_vis       ,  set_defaults)
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_diffuse_nir       ,  set_defaults)
+      CALL sync_hist_vars_one (DEF_hist_vars%lakealb_diffuse_shortwave       ,  set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%xy_us       ,  set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%xy_vs       ,  set_defaults)
       CALL sync_hist_vars_one (DEF_hist_vars%xy_t        ,  set_defaults)

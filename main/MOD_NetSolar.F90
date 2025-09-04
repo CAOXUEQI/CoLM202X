@@ -22,6 +22,7 @@ CONTAINS
                         forc_sols,forc_soll,forc_solsd,forc_solld,&
                         alb,ssun,ssha,lai,sai,rho,tau,ssno,&
                         parsun,parsha,sabvsun,sabvsha,sabg,sabg_lyr,sr,&
+                        sabgv,sabgvd,sabgvda,sabgvdu,sabgn,sabgnd,&
                         solvd,solvi,solnd,solni,srvd,srvi,srnd,srni,&
                         solvdln,solviln,solndln,solniln,srvdln,srviln,srndln,srniln)
 !
@@ -89,6 +90,12 @@ CONTAINS
          sabvsun,    &! solar absorbed by sunlit vegetation [W/m2]
          sabvsha,    &! solar absorbed by shaded vegetation [W/m2]
          sabg,       &! solar absorbed by ground  [W/m2]
+         sabgv,      &! direct beam vis solar absorbed by ground  [W/m2]
+         sabgvd,     &! diffuse beam vis solar absorbed by ground  [W/m2]
+         sabgvdu,    &! diffuse beam vis solar reflected by ground  [W/m2]
+         sabgvda,    &! diffuse beam vis solar reflected and absorbed by ground  [W/m2]
+         sabgn,      &! direct beam nir solar absorbed by ground  [W/m2]
+         sabgnd,     &! diffuse beam nir solar absorbed by ground  [W/m2]
          sr,         &! total reflected solar radiation (W/m2)
          solvd,      &! incident direct beam vis solar radiation (W/m2)
          solvi,      &! incident diffuse beam vis solar radiation (W/m2)
@@ -129,6 +136,10 @@ CONTAINS
       ENDIF
 
       sabg = 0.
+      sabgv=0.
+      sabgvd=0.
+      sabgn=0.
+      sabgnd=0.
       sabg_lyr(:) = 0.
 
       IF (patchtype == 0) THEN
@@ -196,6 +207,18 @@ CONTAINS
             sabvg = forc_sols *(1.-alb(1,1)) + forc_soll *(1.-alb(2,1)) &
                   + forc_solsd*(1.-alb(1,2)) + forc_solld*(1.-alb(2,2))
             sabg  = sabvg
+            sabgvd = forc_solsd*(1.-alb(1,2))
+            sabgvdu = forc_solsd*alb(1,2)
+            sabgv = forc_sols *(1.-alb(1,1))
+            sabgvda = sabgvdu+sabgvd
+            sabgn = forc_soll *(1.-alb(2,1))
+            sabgnd = forc_solld*(1.-alb(2,2))
+            ! print*,'netsolar',sabg,sabgv+sabgvd+sabgn+sabgnd
+            ! print*,'alb',alb(1,2)
+            ! print*,'sabgvdu',sabgvdu
+            ! print*,'sabgvd',sabgvd
+            ! print*,'forc_solsd',forc_solsd
+            ! print*,'sabgvda',sabgvda
          ENDIF
 
          IF (DEF_USE_SNICAR) THEN

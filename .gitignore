@@ -5,3 +5,4 @@ run/log_CaMa.txt
 __pycache__
 *.o
 *.mod
+*.log

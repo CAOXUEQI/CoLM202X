@@ -1,29 +1,29 @@
 &nl_colm_forcing
 
    ! ----- forcing -----
-   DEF_dir_forcing  = '/stu01/caoxq18/Nam_Co/forcing/'
+   DEF_dir_forcing  = '/stu01/caoxq18/data/Forcing/'
 
    DEF_forcing%dataset           = 'POINT' 
    DEF_forcing%solarin_all_band  = .true.  
    DEF_forcing%HEIGHT_V          = 10.0    
-   DEF_forcing%HEIGHT_T          = 3.
-   DEF_forcing%HEIGHT_Q          = 10.
+   DEF_forcing%HEIGHT_T          = 2.
+   DEF_forcing%HEIGHT_Q          = 2.
    
    DEF_forcing%NVAR              = 8        ! variable number of forcing data
-   DEF_forcing%startyr           = 1970     ! start year of forcing data  
+   DEF_forcing%startyr           = 2010     ! start year of forcing data  
    DEF_forcing%startmo           = 1        ! start month of forcing data
-   DEF_forcing%endyr             = 2014     ! end year of forcing data
+   DEF_forcing%endyr             = 2013     ! end year of forcing data
    DEF_forcing%endmo             = 12       ! end month of forcing data
-   DEF_forcing%dtime             = 600 600 600 600 600 600 600 600
+   DEF_forcing%dtime             = 10800 10800 10800 10800 10800 10800 10800 10800
    
-   DEF_forcing%fprefix(1) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(2) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(3) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(4) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(5) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(6) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(7) = 'Nam_Co-19700101-20141231.nc'
-   DEF_forcing%fprefix(8) = 'Nam_Co-19700101-20141231.nc'
+   DEF_forcing%fprefix(1) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(2) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(3) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(4) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(5) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(6) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(7) = 'Namco-CMFD2-20100101-20131231.nc'
+   DEF_forcing%fprefix(8) = 'Namco-CMFD2-20100101-20131231.nc'
    
    DEF_forcing%vname    = 'Tair' 'Qair' 'Psurf' 'Precip' 'NULL' 'Wind' 'SWdown' 'LWdown' 
    DEF_forcing%tintalgo = 'linear' 'linear' 'linear' 'nearest' 'NULL' 'linear' 'coszen' 'linear'

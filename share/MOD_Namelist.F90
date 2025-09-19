@@ -998,7 +998,7 @@ CONTAINS
          DEF_file_snowaging  = trim(DEF_dir_runtime)//'/snicar/snicar_drdt_bst_fit_60_c070416.nc'
          DEF_file_lakeopticsr = '/stu01/caoxq18/SNICAR-ADv5/mlw_clr_snwrds_wtr.nc'
          DEF_file_lakeopticsd = '/stu01/caoxq18/SNICAR-ADv5/mlw_cld_snwrds_wtr.nc'
-         DEF_file_lakeicepro = '/stu01/caoxq18/SNICAR-ADv5/new_edi/trout_bc_processed_data.nc'
+         DEF_file_lakeicepro = '/stu01/caoxq18/SNICAR-ADv5/new_edi/trout_bc_processed_data_2017.nc'
 
          IF (.not. DEF_USE_SNICAR) THEN
             IF (DEF_Aerosol_Readin) THEN

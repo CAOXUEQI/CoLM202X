@@ -1,9 +1,9 @@
 &nl_colm
    
-   DEF_CASE_NAME = 'Trout_snicar_log'         
+   DEF_CASE_NAME = 'TroutBog_snicar_log'         
    
    ! surface data from SITE.
-   SITE_fsrfdata = '/stu01/caoxq18/data/New_Surfacedata_Trout.nc'
+   SITE_fsrfdata = '/stu01/caoxq18/data/New_Surfacedata_TroutBog.nc'
    ! path to surface database
    DEF_dir_rawdata = '/shr03/CoLMrawdata/'
    DEF_dir_runtime = '/shr03/CoLMruntime/'

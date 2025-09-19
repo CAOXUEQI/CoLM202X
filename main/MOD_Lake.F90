@@ -1832,8 +1832,8 @@ MODULE MOD_Lake
                   ! (regression of secchi depth with lake depth for small glacial basin lakes), and the
                   ! Poole & Atkins expression for extinction coeffient of 1.7 / secchi Depth (m).
 
-                  eta = 1.1925*max(lakedepth,1.)**(-0.424)
-                  ! eta = 0.314
+                  ! eta = 1.1925*max(lakedepth,1.)**(-0.424)
+                  eta = 0.314
                   zin  = z_lake(j) - 0.5*dz_lake(j)
                   zout = z_lake(j) + 0.5*dz_lake(j)
                   rsfin  = exp( -eta*max(  zin-za(idlak),0. ) )  ! the radiation within surface layer (z<za)
@@ -1845,6 +1845,7 @@ MODULE MOD_Lake
 
                   phi(j) = (rsfin-rsfout) * sabg * (1.-betaprime)
                   if (j == nl_lake) phi_soil = rsfout * sabg * (1.-betaprime)
+                  write(*,*)'rsfin-rsfout',i,rsfin-rsfout
                end do
             else if (snl == 0) then     !no snow-covered layers, but partially frozen
                phi(1) = sabg * (1.-betaprime)
@@ -1855,10 +1856,23 @@ MODULE MOD_Lake
                phi(:) = 0.
                phi_soil = 0.
             end if
-            do i = 1, nl_lake
-               write(*,*)i,phi(i)
+            write(*,*)sabg*(1-betaprime)
+            write(*,*)sabgv+sabgvd
+            if (sabg /= 0 .and. sabgv+sabgvd /= 0 ) then 
+               write(*,*)'in if'
+               do i = 1,nl_lake
+                  write(*,*)'direct_vis',i,phi(i)*sabgv/(sabgv+sabgvd)
+               enddo
+               do i = 1,nl_lake
+                  write(*,*)'diffuse_vis',i,phi(i)*sabgvd/(sabgv+sabgvd)
+               enddo
+            endif
+            write(*,*)'phi_srf',sabg * betaprime
+               do i = 1, nl_lake
+                  write(*,*)'original',i,phi(i)
             enddo 
             write(*,*)'phi_soil',phi_soil
+            write(*,*)'phi_all',sabg-phi_soil
             calday = calendarday(idate)
             coszen=orb_coszen(calday,dlon,dlat) 
             
@@ -2263,19 +2277,20 @@ MODULE MOD_Lake
                                  wliq_soisno_snicar(lb_snicar:1),wice_soisno_snicar(lb_snicar:1), t_soisno_snicar(lb_snicar:1),scv_snicar,snowdp_snicar, &
                                  mss_bcpho(lb_snicar:0), mss_bcphi(lb_snicar:0), mss_ocpho(lb_snicar:0), mss_ocphi(lb_snicar:0),&
                                  mss_dst1(lb_snicar:0),  mss_dst2(lb_snicar:0),  mss_dst3(lb_snicar:0),  mss_dst4(lb_snicar:0))
-               ! write(*,*)'lb_snicar after', lb_snicar
-               ! write(*,*)'after wice_soisno',wice_soisno(lb)
-               ! write(*,*)'after wliq_soisno',wliq_soisno(lb)
-               ! write(*,*)'after dz_soisno',dz_soisno(lb)
+         !       ! write(*,*)'lb_snicar after', lb_snicar
+         !       ! write(*,*)'after wice_soisno',wice_soisno(lb)
+         !       ! write(*,*)'after wliq_soisno',wliq_soisno(lb)
+         !       ! write(*,*)'after dz_soisno',dz_soisno(lb)
 
-         ! Divide thick snow elements
+         ! ! Divide thick snow elements
+               write(*,*)'snl_snicar',snl_snicar
                if (snl_snicar < 0) then
-                  call snowlayersdivide_SNICAR (lb_snicar,snl_snicar,z_soisno_snicar(lb:0),dz_soisno_snicar(lb:0),zi_soisno_snicar(lb-1:0),&
-                                 wliq_soisno_snicar(lb:0),wice_soisno_snicar(lb:0),t_soisno_snicar(lb:0)     ,&
-                                 mss_bcpho(lb:0), mss_bcphi(lb:0), mss_ocpho(lb:0), mss_ocphi(lb:0),&
-                                 mss_dst1(lb:0),  mss_dst2(lb:0),  mss_dst3(lb:0),  mss_dst4(lb:0) )
+                  call snowlayersdivide_SNICAR (lb_snicar,snl_snicar,z_soisno_snicar(lb_snicar:0),dz_soisno_snicar(lb_snicar:0),zi_soisno_snicar(lb_snicar-1:0),&
+                                 wliq_soisno_snicar(lb_snicar:0),wice_soisno_snicar(lb_snicar:0),t_soisno_snicar(lb_snicar:0)     ,&
+                                 mss_bcpho(lb_snicar:0), mss_bcphi(lb_snicar:0), mss_ocpho(lb_snicar:0), mss_ocphi(lb_snicar:0),&
+                                 mss_dst1(lb_snicar:0),  mss_dst2(lb_snicar:0),  mss_dst3(lb_snicar:0),  mss_dst4(lb_snicar:0) )
                endif
-               ! write(*,*)'mss_bcpho',mss_bcpho
+         !       ! write(*,*)'mss_bcpho',mss_bcpho
             endif 
             ! write(*,*)'after wice_soisno',wice_soisno(lb)
             ! write(*,*)'after wliq_soisno',wliq_soisno(lb)
@@ -2503,73 +2518,47 @@ MODULE MOD_Lake
             ! ice_density_wgted = 750  !adjust
             ! mss_cnc_aer_ice_in = 0._r8
 
-            snw_rds_lcl(1:nbr_lyr)    = air_bubble(3)
-            ice_density_wgted = ice_density(3)  !adjust
-            mss_cnc_aer_ice_in = bc(3)*1.0E-9
+            snw_rds_lcl(1:nbr_lyr)    = air_bubble(1)
+            ice_density_wgted = ice_density(1)  !adjust
+            mss_cnc_aer_ice_in = bc(1)*1.0E-9
             write(*,*)'ice_properity start'
             if(nl_ice > 0 ) then 
-               if(idate(1)==2017.and.idate(2)>43 .and.idate(2)<49) then 
+               ! if(idate(1)==2012.and.idate(2)>306 ) then 
+               !    snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-306)
+               !    ice_density_wgted = ice_density(idate(2)-306)
+               !    mss_cnc_aer_ice_in = bc(idate(2)-306)*1.0E-9
+               ! endif
+               ! if(idate(1)==2013.and.idate(2)<72) then 
+               !    snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)+60)
+               !    ice_density_wgted = ice_density(idate(2)+60)
+               !    mss_cnc_aer_ice_in = bc(idate(2)+60)*1.0E-9
+               ! endif
+               ! if(idate(1)==2013.and.idate(2)>71) then 
+               !    snw_rds_lcl(1:nbr_lyr) = air_bubble(131)
+               !    ice_density_wgted = ice_density(131)
+               !    mss_cnc_aer_ice_in = bc(131)*1.0E-9
+               ! endif
+               ! if(idate(1)==2019.and.idate(2)>69 .and.idate(2)<90) then 
+               !    snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-69)
+               !    ice_density_wgted = ice_density(idate(2)-69)
+               !    mss_cnc_aer_ice_in = bc(idate(2)-69)*1.0E-9
+               ! endif
+               ! if(idate(1)==2019.and.idate(2)>90) then 
+               !    snw_rds_lcl(1:nbr_lyr) = air_bubble(20)
+               !    ice_density_wgted = ice_density(20)
+               !    mss_cnc_aer_ice_in = bc(20)*1.0E-9
+               ! endif
+               if(idate(1)==2017.and.idate(2)>43 .and.idate(2)<51) then 
                   snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-43)
                   ice_density_wgted = ice_density(idate(2)-43)
                   mss_cnc_aer_ice_in = bc(idate(2)-43)*1.0E-9
                endif
+               if(idate(1)==2017.and.idate(2)>50) then 
+                  snw_rds_lcl(1:nbr_lyr) = air_bubble(7)
+                  ice_density_wgted = ice_density(7)
+                  mss_cnc_aer_ice_in = bc(7)*1.0E-9
+               endif
             endif
-            ! if(idate(1)==2015.and.idate(2)>327) then 
-            !    snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-327)
-            !    ice_density_wgted = ice_density(idate(2)-327)
-            !    mss_cnc_aer_ice_in = bc(idate(2)-327)*1.0E-9
-            ! endif 
-            ! if(idate(1)==2016.and.idate(2)<119) then 
-            !    snw_rds_lcl(1:nbr_lyr) = air_bubble(365-327+idate(2))
-            !    ice_density_wgted = ice_density(365-327+idate(2))
-            !    mss_cnc_aer_ice_in = bc(365-327+idate(2))*1.0E-9
-            ! endif
-            !  if (idate(1)==2013.and.idate(2)>4.and.idate(2)<88) then 
-            !     snw_rds_lcl(1:nbr_lyr) = air_bubble(idate(2)-4)
-            !     ice_density_wgted = ice_density(idate(2)-4)
-            !     mss_cnc_aer_ice_in = bc(idate(2)-4)*1.0E-9             
-            !  endif
-            ! if (idate(1)==2015.and.idate(2)>342) then 
-            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+343.0)/30.0)*1034.+ &
-            !                            ((idate(2)-343.0)/30.0)*1073.33333333)
-            !    ice_density_wgted = ((30.0-idate(2)+343.0)/30.0)*822.+ &
-            !                         ((idate(2)-343.0)/30.0)*830.5
-            !    mss_cnc_aer_ice_in = ((30.0-idate(2)+343.0)/30.0)*1468.66666667*1.0E-9+ &
-            !                         ((idate(2)-343.0)/30.0)*1314.66666667*1.0E-9
-            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6
-            ! elseif (idate(1)==2016.and.idate(2)<8) then 
-            !    snw_rds_lcl(1:nbr_lyr) = nint(((8.0-idate(2))/30.0)*1034.+ &
-            !                            ((22.0+idate(2))/30.0)*1073.33333333)
-            !    ice_density_wgted = (((8.0-idate(2))/30.0))*822.+ &
-            !                         ((22.0+idate(2))/30.0)*830.5   
-            !    mss_cnc_aer_ice_in = (((8.0-idate(2))/30.0))*1468.66666667*1.0E-9+ &
-            !                         ((22.0+idate(2))/30.0)*1314.66666667*1.0E-9   
-            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6          
-            ! elseif (idate(1)==2016.and.idate(2)>7.and.idate(2)<38) then 
-            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+8.0)/30.0)*1073.33333333+ &
-            !                            ((idate(2)-8.0)/30.0)*899.33333333)
-            !    ice_density_wgted = (((30.0-idate(2)+8.0)/30.0))*830.5 +&
-            !                         ((idate(2)-8.0)/30.0)*822. 
-            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+8.0)/30.0))*1314.66666667*1.0E-9 +&
-            !                         ((idate(2)-8.0)/30.0)*742.66666667*1.0E-9   
-            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6  
-            ! elseif (idate(1)==2016.and.idate(2)>37.and.idate(2)<68) then 
-            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+38.0)/30.0)*899.33333333+ &
-            !                            ((idate(2)-38.0)/30.0)*960.66666667)
-            !    ice_density_wgted = (((30.0-idate(2)+38.0)/30.0))*822.+ &
-            !                         ((idate(2)-38.0)/30.0)*817.  
-            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+38.0)/30.0))*742.66666667*1.0E-9+ &
-            !                         ((idate(2)-38.0)/30.0)*894.*1.0E-9  
-            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6
-            ! elseif (idate(1)==2016.and.idate(2)>67.and.idate(2)<=97) then 
-            !    snw_rds_lcl(1:nbr_lyr) = nint(((30.0-idate(2)+68.0)/30.0)*960.66666667+ &
-            !                            ((idate(2)-68.0)/30.0)*936.66666667)
-            !    ice_density_wgted = (((30.0-idate(2)+68.0)/30.0))*817.+ &
-            !                         ((idate(2)-68.0)/30.0)*797.5  
-            !    mss_cnc_aer_ice_in = (((30.0-idate(2)+68.0)/30.0))*894.*1.0E-9+ &
-            !                         ((idate(2)-68.0)/30.0)*682.*1.0E-9   
-            !    ! mss_cnc_aer_in(:,1) =mss_cnc_aer_in(:,1) *1.0E6          
-            ! endif
             write(*,*)'ice_properity end',snw_rds_lcl(1),ice_density_wgted,mss_cnc_aer_ice_in
             ! 
 
@@ -3161,7 +3150,7 @@ MODULE MOD_Lake
                      enddo 
                      if(nl_ice>0) then 
                         if(i<=nl_ice.and.i>0) then 
-                           L_snw(i)   = ice_density_wgted*dziw(i) - sum(L_aer(i,:))
+                           L_snw(i)   = L_snw(i) - sum(L_aer(i,:))
                         endif 
                      endif
                      ! write(*,*)'L_snw',i,L_snw(i)
@@ -3182,18 +3171,18 @@ MODULE MOD_Lake
                      enddo
                      ! write(*,*)'check sum',tau_sum,omega_sum,g_sum
                      tau(i)    = tau_sum + tau_snw(i)
-                     omega(i)  = (1/tau(i))*(omega_sum+(ss_alb_snw_lcl(i)*tau_snw(i)))
-                     g(i)      = (1/(tau(i)*omega(i)))*(g_sum+ (asm_prm_snw_lcl(i)*ss_alb_snw_lcl(i)*tau_snw(i)))
+                     omega(i)  = (1./tau(i))*(omega_sum+(ss_alb_snw_lcl(i)*tau_snw(i)))
+                     g(i)      = (1./(tau(i)*omega(i)))*(g_sum+ (asm_prm_snw_lcl(i)*ss_alb_snw_lcl(i)*tau_snw(i)))
                      ! write(*,*)'tau', i, tau(i)
                      ! write(*,*)'omega', i, omega(i)
                      ! write(*,*)'g', i, g(i)
                   enddo ! endWeighted Mie parameters of each layer  
                   do i = nl_ice+1,nbr_lyr
                      L_snw(i)   = rho_snw(i)*dziw(i)
-                     tau_snw(i) = L_snw(i)*ext_cff_mss_snw_lcl(i)
-                     tau(i)    =  tau_snw(i)
-                     omega(i)  = ss_alb_snw_lcl(i)
-                     g(i)      = asm_prm_snw_lcl(i)
+                     tau_snw(i) = dziw(i)*ext_cff_mss_snw_lcl(i)
+                     tau(i)     =  tau_snw(i)
+                     omega(i)   = (1./tau(i))*(ss_alb_snw_lcl(i)*tau_snw(i))
+                     g(i)       = (1./(tau(i)*omega(i)))*(asm_prm_snw_lcl(i)*ss_alb_snw_lcl(i)*tau_snw(i))
                   enddo  
 
                   if(flg_slr_in == 1) then
@@ -3330,8 +3319,10 @@ MODULE MOD_Lake
                         apg = alp + gam
                         amg = alp - gam
                         ! write(*,*)'apg',apg,'amg',amg
-                        rdir(i) = apg*rdif_a(i) +  amg*(tdif_a(i)*trnlay(i) - c1)
-                        tdir(i) = apg*tdif_a(i) + (amg* rdif_a(i)-apg+c1)*trnlay(i)
+                        rdir(i) = apg*rdif_a(i) +  amg*(tdif_a(i)*trnlay(i) - c1)     
+                        !Ru0 The layer reflectance to direct-beam radiation
+                        tdir(i) = apg*tdif_a(i) + (amg* rdif_a(i)-apg+c1)*trnlay(i)   
+                        !Tu0 The layer transmittance to direct radiation
                         ! write(*,*)i,'flg_slr_in',flg_slr_in,'rdir',i,rdir(i)
 
                         ! recalculate rdif,tdif using direct angular integration over rdir,tdir,
@@ -3364,7 +3355,9 @@ MODULE MOD_Lake
                         ! write(*,*)i,'rdif_a',rdif_a(i),'tdif_a',tdif_a(i)
                         ! homogeneous layer
                         rdif_b(i) = rdif_a(i)
+                        !The layer reflectance to diffuse-beam radiation
                         tdif_b(i) = tdif_a(i)  
+                        !The layer transmittance to diffuse radiation
 
                         if( i == kfrsnl1 .or. i == kfrsnl2 .or. i == kfrsnl3.or. i == kfrsnl4) then
                            ! write(*,*)'kfrsnl start'
@@ -3493,6 +3486,7 @@ MODULE MOD_Lake
                      ! write(*,*)i,'refkm1',refkm1,'rdif_b',rdif_b(i)
                      mu0 = mu0n
                   enddo       ! i    end main level loop
+
                   ! write(*,*)'end main level loop'
                   ! compute reflectivity to direct and diffuse radiation for layers
                   ! below by adding succesive layers starting from the underlying
@@ -3589,6 +3583,27 @@ MODULE MOD_Lake
                      if (dfdif(i) < puny) dfdif(i) = c0
                      ! write(*,*)i,'dfdif',dfdif(i)
                   enddo       ! i
+                  write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdirup',i,fdirup(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdirdn',i,fdirdn(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdifup',i,fdifup(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdifdn',i,fdifdn(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'dfdir',i,dfdir(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'dfdif',i,dfdif(i)
+                  enddo
+                  
+
                   ! write(*,*)'end 3358'
                   if (flg_slr_in == 1) then 
                      albedo = rupdir(snl_top)
@@ -3597,6 +3612,9 @@ MODULE MOD_Lake
                      albedo = rupdif(snl_top)
                      dftmp = dfdif 
                   endif 
+                  ! do i =  snl_top, snl_btm_itf 
+                  !    ! write(*,*)'dftmp',flg_slr_in,i,dftmp(i)
+                  ! enddo 
                   albout_lcl(bnd_idx) = albedo
                   flx_interface_lcl(:,bnd_idx) = dftmp
                   do i = snl_top, nl_lake 
@@ -3610,6 +3628,10 @@ MODULE MOD_Lake
                      flx_abs_lcl(i,bnd_idx) = F_abs(i)                    
                      ! write(*,*)i,'flx_abs_lcl',flx_abs_lcl(i,bnd_idx)
                      ! flx_abs_btm(bnd_idx) = dftmp(snl_btm_itf)
+                  enddo
+
+                  do i = snl_top, nl_lake 
+                     write(*,*)'F_abs',F_abs(i)
                   enddo
 
                   if (flg_slr_in == 1) then 
@@ -3641,7 +3663,7 @@ MODULE MOD_Lake
                   flx_sum = flx_sum + flx_wgt(bnd_idx)*albout_lcl(bnd_idx)
                enddo
                albout(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-               ! write(*,*)'flg_slr_in',flg_slr_in,'albout',albout(:)
+               write(*,*)'flg_slr_in',flg_slr_in,'albout',albout(:)
                flx_abs(:,1) = flx_abs_lcl(:,1)
                flx_interface(:,1) = flx_interface_lcl(:,1)
                flx_abs_up(1) = flx_abs_up_lcl(1)
@@ -3759,15 +3781,29 @@ MODULE MOD_Lake
             endif
             ! write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld
             ! write(*,*)'innir',forc_soll+forc_solld
-            ! phisum = 0
-            ! do i = snl_top,nl_lake
-            !    phisum = phisum + phi(i)
-            !    write(*,*) 'phi',i, phi(i)
-            ! enddo
+            phisum = 0
+            do i = snl_top,nl_lake
+               phisum = phisum+phi(i)
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'direct_vis',i, flx_absd(i,1)*forc_sols
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'diffuse_vis',i, flx_absi(i,1)*forc_solsd
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'vis',i, (flx_absd(i,1)*forc_sols+flx_absi(i,1)*forc_solsd)
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'nir',i, (flx_absd(i,2)*forc_soll+flx_absi(i,2)*forc_solld)
+            enddo            
             phi_soil = (flx_abs_dnd(1)*forc_sols+flx_abs_dnd(2)*forc_soll &
                         +flx_abs_dni(1)*forc_solsd+flx_abs_dni(2)*forc_solld)
-            ! write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld,'sum',phi_up+phi_soil+phisum+phi_srf,&
-            ! 'up',phi_up,'soil',phi_soil,'srf',phi_srf,'sumphi',phisum
+            do i = 1, nl_lake 
+               write(*,*)'twostream',i,phi(i)
+            end do 
+            write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld,'sum',phi_up+phi_soil+phisum+phi_srf,&
+            'up',phi_up,'soil',phi_soil,'srf',phi_srf,'sumphi',phisum
             ! lakealb_vis = albout(1)
             ! lakealb_nir = albout(2)
             ! if (flx_abs_dnd1(1)*forc_sols+flx_abs_dnd1(2)*forc_soll/=0.) then 

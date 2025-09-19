@@ -1,6 +1,6 @@
 &nl_colm
    
-   DEF_CASE_NAME = 'Nam_Co_bc_newsrf_hour'         
+   DEF_CASE_NAME = 'Nam_Co_snicar_log'         
    
    ! surface data from SITE.
    SITE_fsrfdata = '/stu01/caoxq18/data/New_Surfacedata_Nam_Co.nc'
@@ -20,23 +20,23 @@
    USE_SITE_topography      = .false.
 
    DEF_simulation_time%greenwich     = .false.
-   DEF_simulation_time%start_year    = 1970
+   DEF_simulation_time%start_year    = 2010
    DEF_simulation_time%start_month   = 1
    DEF_simulation_time%start_day     = 1
    DEF_simulation_time%start_sec     = 0
-   DEF_simulation_time%end_year      = 2014
+   DEF_simulation_time%end_year      = 2013
    DEF_simulation_time%end_month     = 12
    DEF_simulation_time%end_day       = 31
    DEF_simulation_time%end_sec       = 0
-   DEF_simulation_time%spinup_year   = 2010
+   DEF_simulation_time%spinup_year   = 2012
    DEF_simulation_time%spinup_month  = 1
    DEF_simulation_time%spinup_day    = 1
    DEF_simulation_time%spinup_sec    = 0
    DEF_simulation_time%spinup_repeat = 1
 
-   DEF_simulation_time%timestep     = 600.
+   DEF_simulation_time%timestep     = 3600.
    
-   DEF_dir_output = '/stu01/caoxq18/cases/2025'
+   DEF_dir_output = '/stu01/caoxq18/cases/20250903/'
    
    ! LAI setting
    DEF_LAI_MONTHLY = .true.
@@ -59,7 +59,7 @@
    DEF_REST_COMPRESS_LEVEL = 0
    DEF_HIST_COMPRESS_LEVEL = 0
    
-   DEF_hist_vars_namelist = '/stu01/caoxq18/Colm_snicar/run/20250107/forcing/Ngoring_hist.nml'
+   DEF_hist_vars_namelist = '/stu01/caoxq18/Colm_snicar/run/20250107/forcing/history.nml'
    DEF_hist_vars_out_default = .true.
 
 /

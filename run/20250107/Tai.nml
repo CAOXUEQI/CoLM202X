@@ -1,9 +1,9 @@
 &nl_colm
    
-   DEF_CASE_NAME = 'Trout_snicar_log'         
+   DEF_CASE_NAME = 'Tai_snicar_log'         
    
    ! surface data from SITE.
-   SITE_fsrfdata = '/stu01/caoxq18/data/New_Surfacedata_Trout.nc'
+   SITE_fsrfdata = '/stu01/caoxq18/data/New_Surfacedata_Tai.nc'
    ! path to surface database
    DEF_dir_rawdata = '/shr03/CoLMrawdata/'
    DEF_dir_runtime = '/shr03/CoLMruntime/'
@@ -20,21 +20,21 @@
    USE_SITE_topography      = .false.
 
    DEF_simulation_time%greenwich     = .false.
-   DEF_simulation_time%start_year    = 2015
-   DEF_simulation_time%start_month   = 11
-   DEF_simulation_time%start_day     = 6
-   DEF_simulation_time%start_sec     = 3600
-   DEF_simulation_time%end_year      = 2018
-   DEF_simulation_time%end_month     = 3
-   DEF_simulation_time%end_day       = 10
-   DEF_simulation_time%end_sec       = 0
-   DEF_simulation_time%spinup_year   = 2016
-   DEF_simulation_time%spinup_month  = 11
-   DEF_simulation_time%spinup_day    = 6
-   DEF_simulation_time%spinup_sec    = 3600
+   DEF_simulation_time%start_year    = 2009
+   DEF_simulation_time%start_month   = 6
+   DEF_simulation_time%start_day     = 13
+   DEF_simulation_time%start_sec     = 0
+   DEF_simulation_time%end_year      = 2011
+   DEF_simulation_time%end_month     = 6
+   DEF_simulation_time%end_day       = 30
+   DEF_simulation_time%end_sec       = 82800
+   DEF_simulation_time%spinup_year   = 2010
+   DEF_simulation_time%spinup_month  = 1
+   DEF_simulation_time%spinup_day    = 1
+   DEF_simulation_time%spinup_sec    = 0
    DEF_simulation_time%spinup_repeat = 1
 
-   DEF_simulation_time%timestep     = 3600.
+   DEF_simulation_time%timestep     = 1800.
    
    DEF_dir_output = '/stu01/caoxq18/cases/20250903/'
    
@@ -48,7 +48,7 @@
    DEF_Interception_scheme = 1 ! 1:CoLM2014；2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC
    
    ! ----- forcing -----
-   DEF_forcing_namelist = '/stu01/caoxq18/Colm_snicar/run/20250107/forcing/Trout.nml'
+   DEF_forcing_namelist = '/stu01/caoxq18/Colm_snicar/run/20250107/forcing/Tai.nml'
 
    ! ----- history -----
    DEF_hist_lon_res = 1.

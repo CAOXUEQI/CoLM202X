@@ -958,9 +958,7 @@ MODULE MOD_Lake
   real(r8):: flx_sum                             ! temporary summation variable for NIR weighting
   real(r8):: albout_lcl(numrad_snw)              ! snow albedo by band [frc]
   real(r8):: flx_abs_lcl(maxsnl+1:12,numrad_snw)  ! absorbed flux per unit incident flux at top of snowpack (lyr,bnd) [frc]
-  real(r8):: flx_sum1
-  real(r8):: flx_sum2
-  real(r8):: flx_sum3
+  real(r8):: flx_sum2(maxsnl+1:12)
   real(r8):: L_snw(maxsnl+1:11)                   ! h2o mass (liquid+solid) in snow layer (lyr) [kg/m2]
   real(r8):: tau_snw(maxsnl+1:11)                 ! snow optical depth (lyr) [unitless]
   real(r8):: L_aer(maxsnl+1:11,sno_nbr_aer)       ! aerosol mass in snow layer (lyr,nbr_aer) [kg/m2]
@@ -1036,32 +1034,9 @@ MODULE MOD_Lake
         dfdir(maxsnl+1:12)   , & ! down-up flux at interface due to direct beam at top surface
         dfdif(maxsnl+1:12)   , & ! down-up flux at interface due to diffuse beam at top surface
         fdirdn(maxsnl+1:12)   , & 
-        fdirdn1(maxsnl+1:12)   , & 
-        fdirdn2(maxsnl+1:12)   , & 
-        fdirdn3(maxsnl+1:12)   , & 
         fdirup(maxsnl+1:12)   , &
-        fdirup1(maxsnl+1:12)   , &
-        fdirup2(maxsnl+1:12)   , &
         fdifdn(maxsnl+1:12)   , &
         fdifup(maxsnl+1:12)   , &
-        dirdn_rate_lcl(maxsnl+1:12,numrad_snw),&
-        dirdn_rate_lcl1(maxsnl+1:12,numrad_snw),&
-        dirdn_rate_lcl2(maxsnl+1:12,numrad_snw),&
-        dirdn_rate_lcl3(maxsnl+1:12,numrad_snw),&
-        dirup_rate_lcl(maxsnl+1:12,numrad_snw),&
-        dirup_rate_lcl1(maxsnl+1:12,numrad_snw),&
-        dirup_rate_lcl2(maxsnl+1:12,numrad_snw),&
-        difup_rate_lcl(maxsnl+1:12,numrad_snw),&
-        difdn_rate_lcl(maxsnl+1:12,numrad_snw),&
-        dirdn_rate(maxsnl+1:12,numrad),&
-        dirdn_rate1(maxsnl+1:12,numrad),&
-        dirdn_rate2(maxsnl+1:12,numrad),&
-        dirdn_rate3(maxsnl+1:12,numrad),&
-        dirup_rate(maxsnl+1:12,numrad),&
-        dirup_rate1(maxsnl+1:12,numrad),&
-        dirup_rate2(maxsnl+1:12,numrad),&
-        difup_rate(maxsnl+1:12,numrad),&
-        difdn_rate(maxsnl+1:12,numrad),&
         flx_interface(maxsnl+1:12,numrad), &
         flx_interface_lcl(maxsnl+1:12,numrad_snw), &
         flx_interfaced(maxsnl+1:12,numrad), &
@@ -1893,15 +1868,11 @@ MODULE MOD_Lake
                enddo
             endif
             write(*,*)'phi_srf',sabg * betaprime
-            write(*,*)'in',sabg
-            write(*,*)'no_albedo',forc_sols+forc_soll+forc_solsd+forc_solld
-            phisum = 0
-            do i = 1, nl_lake
-               phisum = phisum+phi(i)
-               write(*,*)'original',i,phi(i)
+               do i = 1, nl_lake
+                  write(*,*)'original',i,phi(i)
             enddo 
             write(*,*)'phi_soil',phi_soil
-            write(*,*)'phi_all',phisum
+            write(*,*)'phi_all',sabg-phi_soil
             calday = calendarday(idate)
             coszen=orb_coszen(calday,dlon,dlat) 
             
@@ -3214,7 +3185,11 @@ MODULE MOD_Lake
                      g(i)       = (1./(tau(i)*omega(i)))*(asm_prm_snw_lcl(i)*ss_alb_snw_lcl(i)*tau_snw(i))
                   enddo  
 
-
+                  if(flg_slr_in == 1) then
+                     ! do i = snl_top,nbr_lyr
+                     !    write(*,*)'bnd_idx',bnd_idx,i,L_snw(i)
+                     ! enddo 
+                  endif
                   ! write(*,*)'endWeighted Mie parameters of each layer'
                   ! DELTA transformations, if requested
                   if (DELTA == 1) then
@@ -3230,14 +3205,6 @@ MODULE MOD_Lake
                         tau_star(i)   = tau(i)
                      enddo
                   endif
-                  ! if(flg_slr_in == 1) then
-                  !    do i = snl_top,nbr_lyr
-                  !       write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx,i,g_star(i),omega_star(i),tau_star(i)
-                  !    enddo 
-                  ! endif
-                  do i = snl_top,nbr_lyr
-                     write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx,i,g_star(i),omega_star(i),tau_star(i)
-                  enddo 
                   ! write(*,*)'DELTA transformations, if requested'
 
                   ! Begin radiative transfer solver
@@ -3324,7 +3291,7 @@ MODULE MOD_Lake
                         ue = c1p5*(c1 - ws*gs)/lm           !ue = u(ws,gs,lm)
                         ! write(*,*)'ue',ue
                         extins = max(exp_min, exp(-lm*ts))
-                        write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx,i,'extins',extins
+                        ! write(*,*)'extins',extins
                         ne = ((ue+c1)*(ue+c1)/extins) - ((ue-c1)*(ue-c1)*extins) !ne = n(ue,extins)
                         ! write(*,*)'lm ue extins ne',lm,ue,extins,ne
                         ! first calculation of rdif, tdif using Delta-Eddington formulas
@@ -3336,7 +3303,6 @@ MODULE MOD_Lake
                         ! write(*,*)'mu0n',mu0n 
                         ! write(*,*)'ts',ts
                         trnlay(i) = max(exp_min, exp(-ts/mu0n))
-                        write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx,i,'trnlay',trnlay(i)
 
                         ! Delta-Eddington solution expressions
                         ! alpha(w,uu,gg,e) = p75*w*uu*((c1 + gg*(c1-w))/(c1 - e*e*uu*uu))
@@ -3542,7 +3508,7 @@ MODULE MOD_Lake
                      rupdir(snl_btm_itf) = albsfc(1)
                      rupdif(snl_btm_itf) = albsfc(1)
                   endif
-                  ! write(*,*)'albsfc',albsfc
+                  write(*,*)'albsfc',albsfc
                   ! write(*,*)'rupdif(snl_btm_itf)',snl_btm_itf,rupdif(snl_btm_itf)
                   ! write(*,*)'rupdif',rupdif
                   ! write(*,*)'rdif_b',rdif_b
@@ -3567,7 +3533,6 @@ MODULE MOD_Lake
                      ! write(*,*)'rupdir',i,bnd_idx,rupdir(i)   
                   enddo       ! i
                   ! write(*,*)'end 3309'
-
                   
                   ! net flux (down-up) at each layer interface from the
                   ! snow top (i = snl_top) to bottom interface above land (i = snl_btm_itf)
@@ -3589,22 +3554,17 @@ MODULE MOD_Lake
                      ! write(*,*)'c1 - rdndif(i)*rupdif(i)',c1 - rdndif(i)*rupdif(i)
                      ! dir tran ref from below times interface scattering, plus diff
                      ! tran and ref from below times interface scattering
-                     fdirup1(i) = trndir(i)*rupdir(i)*refk
-                     fdirup2(i) = (trntdr(i)-trndir(i))*rupdif(i)*refk
-                     fdirup(i)  = (trndir(i)*rupdir(i) + &
+                     fdirup(i) = (trndir(i)*rupdir(i) + &
                                        (trntdr(i)-trndir(i))  &
                                        *rupdif(i))*refk
                      ! dir tran plus total diff trans times interface scattering plus
                      ! dir tran with up dir ref and down dif ref times interface scattering
-                     fdirdn1(i) = trndir(i)
-                     fdirdn2(i) = (trntdr(i) - trndir(i))*refk
-                     fdirdn3(i) = trndir(i)*rupdir(i)*rdndif(i)*refk
                      fdirdn(i) = trndir(i) + (trntdr(i) &
                                     - trndir(i) + trndir(i)  &
                                     *rupdir(i)*rdndif(i))*refk
                      ! diffuse tran ref from below times interface scattering
                      fdifup(i) = trndif(i)*rupdif(i)*refk
-                     ! diffuse tran times interface scattering 
+                     ! diffuse tran times interface scattering
                      fdifdn(i) = trndif(i)*refk
                      ! write(*,*)i,'fdirup',fdirup(i),'fdirdn',fdirdn(i),'fdifup',fdifup(i),'fdifdn',fdifdn(i)
                      ! write(*,*)i
@@ -3623,41 +3583,26 @@ MODULE MOD_Lake
                      if (dfdif(i) < puny) dfdif(i) = c0
                      ! write(*,*)i,'dfdif',dfdif(i)
                   enddo       ! i
-                  ! if (bnd_idx ==1) then
-                  !    write(*,*)'flg_slr_in',flg_slr_in
-                  !    do i = snl_top,snl_btm_itf
-                  !       write(*,*)'dirup',fdirup(i),'dirdn',fdirdn(i),'difup',fdifup(i),'difdn',fdifdn(i)
-                  !    enddo 
-                  ! endif
-                  ! write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx
-                  ! do i = snl_top,snl_btm_itf
-                  !    write(*,*)'fdirup',i,fdirup(i)
-                  ! enddo
-                  ! do i = snl_top,snl_btm_itf
-                  !    write(*,*)'fdirdn',i,fdirdn(i)
-                  ! enddo
-                  ! do i = snl_top,snl_btm_itf
-                  !    write(*,*)'fdifup',i,fdifup(i)
-                  ! enddo
-                  ! do i = snl_top,snl_btm_itf
-                  !    write(*,*)'fdifdn',i,fdifdn(i)
-                  ! enddo
+                  write(*,*)'flg_slr_in',flg_slr_in,'bnd_idx',bnd_idx
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdirup',i,fdirup(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdirdn',i,fdirdn(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdifup',i,fdifup(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'fdifdn',i,fdifdn(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'dfdir',i,dfdir(i)
+                  enddo
+                  do i = snl_top,snl_btm_itf
+                     write(*,*)'dfdif',i,dfdif(i)
+                  enddo
                   
-
-                  dirup_rate_lcl(:,bnd_idx) = fdirup(:)
-                  dirdn_rate_lcl(:,bnd_idx) = fdirdn(:)
-
-                  difup_rate_lcl(:,bnd_idx) = fdifup(:)
-                  difdn_rate_lcl(:,bnd_idx) = fdifdn(:)
-               
-                  dirup_rate_lcl1(:,bnd_idx) = fdirup1(:)
-                  dirdn_rate_lcl1(:,bnd_idx) = fdirdn1(:)
-
-                  dirup_rate_lcl2(:,bnd_idx) = fdirup2(:)
-                  dirdn_rate_lcl2(:,bnd_idx) = fdirdn2(:)
-
-                  dirdn_rate_lcl3(:,bnd_idx) = fdirdn3(:)
-
 
                   ! write(*,*)'end 3358'
                   if (flg_slr_in == 1) then 
@@ -3685,9 +3630,9 @@ MODULE MOD_Lake
                      ! flx_abs_btm(bnd_idx) = dftmp(snl_btm_itf)
                   enddo
 
-                  ! do i = snl_top, nl_lake 
-                  !    write(*,*)'F_abs',F_abs(i)
-                  ! enddo
+                  do i = snl_top, nl_lake 
+                     write(*,*)'F_abs',F_abs(i)
+                  enddo
 
                   if (flg_slr_in == 1) then 
                      flx_abs_up_lcl(bnd_idx) =(trndir(snl_top)*rupdir(snl_top) + (trntdr(snl_top)-trndir(snl_top))  &
@@ -3718,7 +3663,7 @@ MODULE MOD_Lake
                   flx_sum = flx_sum + flx_wgt(bnd_idx)*albout_lcl(bnd_idx)
                enddo
                albout(2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-               ! write(*,*)'flg_slr_in',flg_slr_in,'albout',albout(:)
+               write(*,*)'flg_slr_in',flg_slr_in,'albout',albout(:)
                flx_abs(:,1) = flx_abs_lcl(:,1)
                flx_interface(:,1) = flx_interface_lcl(:,1)
                flx_abs_up(1) = flx_abs_up_lcl(1)
@@ -3748,65 +3693,6 @@ MODULE MOD_Lake
                   flx_abs(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
                   !  write(*,*)'sumflx_wgt',sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
                enddo
-
-               if(flg_slr_in == 1) then 
-                  dirup_rate(:,1) = dirup_rate_lcl(:,1)
-                  dirdn_rate(:,1) = dirdn_rate_lcl(:,1)
-                  dirup_rate1(:,1) = dirup_rate_lcl1(:,1)
-                  dirdn_rate1(:,1) = dirdn_rate_lcl1(:,1)
-                  dirup_rate2(:,1) = dirup_rate_lcl2(:,1)
-                  dirdn_rate2(:,1) = dirdn_rate_lcl2(:,1)
-                  dirdn_rate3(:,1) = dirdn_rate_lcl3(:,1)
-                  do i=snl_top,snl_btm_itf,1
-                     flx_sum = 0._r8
-                     flx_sum1 = 0._r8
-                     flx_sum2 = 0._r8
-                     do bnd_idx= nir_bnd_bgn,nir_bnd_end
-                        flx_sum = flx_sum + flx_wgt(bnd_idx)*dirup_rate_lcl(i,bnd_idx)
-                        flx_sum1= flx_sum1 + flx_wgt(bnd_idx)*dirup_rate_lcl1(i,bnd_idx)
-                        flx_sum2 = flx_sum2 + flx_wgt(bnd_idx)*dirup_rate_lcl2(i,bnd_idx)
-                     enddo
-                     dirup_rate(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                     dirup_rate1(i,2) = flx_sum1 / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                     dirup_rate2(i,2) = flx_sum2 / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                  enddo
-                  do i=snl_top,snl_btm_itf,1
-                     flx_sum = 0._r8
-                     flx_sum1 = 0._r8
-                     flx_sum2 = 0._r8
-                     flx_sum3 = 0._r8
-                     do bnd_idx= nir_bnd_bgn,nir_bnd_end
-                        flx_sum = flx_sum + flx_wgt(bnd_idx)*dirdn_rate_lcl(i,bnd_idx)
-                        flx_sum1 = flx_sum1 + flx_wgt(bnd_idx)*dirdn_rate_lcl1(i,bnd_idx)
-                        flx_sum2 = flx_sum2 + flx_wgt(bnd_idx)*dirdn_rate_lcl2(i,bnd_idx)
-                        flx_sum3 = flx_sum3 + flx_wgt(bnd_idx)*dirdn_rate_lcl3(i,bnd_idx)
-                     enddo
-                     dirdn_rate(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                     dirdn_rate1(i,2) = flx_sum1 / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                     dirdn_rate2(i,2) = flx_sum2 / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                     dirdn_rate3(i,2) = flx_sum3 / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                  enddo
-               endif
-
-               if(flg_slr_in == 2) then
-                  difup_rate(:,1) = difup_rate_lcl(:,1)
-                  difdn_rate(:,1) = difdn_rate_lcl(:,1)
-                  do i=snl_top,snl_btm_itf,1
-                     flx_sum = 0._r8
-                     do bnd_idx= nir_bnd_bgn,nir_bnd_end
-                        flx_sum = flx_sum + flx_wgt(bnd_idx)*difup_rate_lcl(i,bnd_idx)
-                     enddo
-                     difup_rate(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                  enddo
-                  do i=snl_top,snl_btm_itf,1
-                     flx_sum = 0._r8
-                     do bnd_idx= nir_bnd_bgn,nir_bnd_end
-                        flx_sum = flx_sum + flx_wgt(bnd_idx)*difdn_rate_lcl(i,bnd_idx)
-                     enddo
-                     difdn_rate(i,2) = flx_sum / sum(flx_wgt(nir_bnd_bgn:nir_bnd_end))
-                  enddo
-               endif
-
                do i=snl_top,snl_btm_itf,1
                   flx_sum = 0._r8
                   do bnd_idx= nir_bnd_bgn,nir_bnd_end
@@ -3834,219 +3720,27 @@ MODULE MOD_Lake
                endif
 
             enddo ! flg_slr_in
-            do i=snl_top,snl_btm_itf,1
-               write(*,*)'dirup_rate_vis',i,dirup_rate(i,1),'dirdn_rate_vis',dirdn_rate(i,1),'difup_rate_vis',difup_rate(i,1),'difdn_rate_vis',difdn_rate(i,1)
-            enddo
-            do i=snl_top,snl_btm_itf,1
-               write(*,*)'dirup_rate_nir',i,dirup_rate(i,2),'dirdn_rate_nir',dirdn_rate(i,2),'difup_rate_nir',difup_rate(i,2),'difdn_rate_nir',difdn_rate(i,2)
-            enddo
-            do i=snl_top,snl_btm_itf,1
-               write(*,*)'dirup_rate_vis',i,dirup_rate(i,1),'1',dirup_rate1(i,1),'2',dirup_rate2(i,1)
-            enddo 
-            do i=snl_top,snl_btm_itf,1
-               write(*,*)'dirdn_rate_vis',i,dirdn_rate(i,1),'1',dirdn_rate1(i,1),'2',dirdn_rate2(i,1),'3',dirdn_rate3(i,1)
-            enddo
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'direct up vir', i,dirup_rate(i,1)*forc_sols,'direct up vir1', i,dirup_rate1(i,1)*forc_sols,&
-            !             'direct up vir2', i,dirup_rate2(i,1)*forc_sols
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'direct dn vir', i,dirdn_rate(i,1)*forc_sols,'direct dn vir1', i,dirdn_rate1(i,1)*forc_sols,&
-            !             'direct dn vir2', i,dirdn_rate2(i,1)*forc_sols,'direct dn vir3', i,dirdn_rate3(i,1)*forc_sols
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'diffuse up vir', i,difup_rate(i,1)*forc_solsd
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'diffuse dn vir', i,difdn_rate(i,1)*forc_solsd
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'direct up nir', i,dirup_rate(i,2)*forc_soll,'direct up nir1', i,dirup_rate1(i,2)*forc_soll,&
-            !             'direct up nir2', i,dirup_rate2(i,2)*forc_soll
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'direct dn nir', i,dirdn_rate(i,2)*forc_soll,'direct dn nir1', i,dirdn_rate1(i,2)*forc_soll,&
-            !             'direct dn nir2', i,dirdn_rate2(i,2)*forc_soll,'direct dn nir3', i,dirdn_rate3(i,2)*forc_soll
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'diffuse up nir', i,difup_rate(i,2)*forc_solld
-            ! enddo 
-            ! do i = snl_top,snl_btm_itf,1
-            !    write(*,*)'diffuse dn nir', i,difdn_rate(i,2)*forc_solld
-            ! enddo 
-            
-            do i = snl_top,snl_btm_itf,1
-               if(dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll   &
-                                    +difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld/=0)then 
-                  write(*,*)'albedo',i,(dirup_rate(i,1)*forc_sols+difup_rate(i,1)*forc_solsd&
-                                    +dirup_rate(i,2)*forc_soll+difup_rate(i,2)*forc_solld)/&
-                                    (dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll   &
-                                       +difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld)
-               endif
-            enddo
+            ! write(*,*)'direct_vis',sum(flx_absd(:,1))+flx_abs_dnd(1),1.*(1.-albout(1))
+            ! write(*,*)'direct_nir',sum(flx_absd(:,2))+flx_abs_dnd(2),1.*(1.-albout(1))
+            ! write(*,*)'diffuse_vis',sum(flx_absi(:,1))+flx_abs_dni(1),1.*(1.-albout(2))
+            ! write(*,*)'diffuse_nir',sum(flx_absi(:,2))+flx_abs_dni(2),1.*(1.-albout(2))
 
-            do i = snl_top,snl_btm_itf,1
-               if(dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll /= 0) then 
-                  write(*,*)'new direct shortwave', i,&
-                  (dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)&
-                  /(dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll)
-               endif 
-            enddo 
-            do i = snl_top,snl_btm_itf,1
-               if(difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld /= 0) then 
-                  write(*,*)'new diffuse shortwave', i,&
-                  (difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)&
-                  /(difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld)
-               endif 
-            enddo 
-            do i = snl_top,snl_btm_itf,1
-               if(dirdn_rate(i,1)*forc_sols/= 0) then 
-                  write(*,*)'new direct vis', i,&
-                  (dirup_rate(i,1)*forc_sols)&
-                  /(dirdn_rate(i,1)*forc_sols)
-               endif 
-            enddo 
-            do i = snl_top,snl_btm_itf,1
-               if(difdn_rate(i,1)*forc_solsd/= 0) then 
-                  write(*,*)'new diffuse vis', i,&
-                  (difup_rate(i,1)*forc_solsd)&
-                  /(difdn_rate(i,1)*forc_solsd)
-               endif 
-            enddo
-            do i = snl_top,snl_btm_itf,1
-               if(dirdn_rate(i,2)*forc_soll /= 0) then 
-                  write(*,*)'new direct nir', i,&
-                  (dirup_rate(i,2)*forc_soll)&
-                  /(dirdn_rate(i,2)*forc_soll)
-               endif 
-            enddo 
-            do i = snl_top,snl_btm_itf,1
-               if(difdn_rate(i,2)*forc_solld /= 0) then 
-                  write(*,*)'new diffuse nir', i,&
-                  (difup_rate(i,2)*forc_solld)&
-                  /(difdn_rate(i,2)*forc_solld)
-               endif 
-            enddo
-            do i = snl_top,snl_btm_itf,1
-               write(*,*)i,'up', (dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)+(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld),&
-                           'direct up',dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll,&
-                           'diffuse up',difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld,&
-                           'down',dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll+difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld,&
-                           'direct down',dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll,&
-                           'diffuse down',difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_soll
-            enddo
-            do i = snl_top, nl_lake 
-               if (nbr_lyr == 10 .or. i < kfrsnl3-1) then 
-                  phi(i) =          dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                    +difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                    -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                    -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                    -(dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll)    &
-                                    -(difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld)  &
-                                    +(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll)  &
-                                    +(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld) 
-                  write(*,*)'new_phi',i,phi(i)
-                  write(*,*)'new_phi_dir',i,dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                    -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                    -(dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll)    &
-                                    +(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll)
-                  if((forc_sols+forc_soll)/=0.)then
-                     write(*,*)'new_phi_dir_per',i,(dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                       -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                       -(dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll)    &
-                                       +(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll))/(forc_sols+forc_soll)
-                  endif
-                  write(*,*)'new_phi_dif',i,difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                    -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                    -(difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld)  &
-                                    +(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld) 
-                  if((forc_solsd+forc_solld) /=0.)then
-                     write(*,*)'new_phi_dif_per',i,(difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                       -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                       -(difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld)  &
-                                       +(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld))/(forc_solsd+forc_solld)
-                  endif
-               elseif (i == kfrsnl3-1) then
-                  phi(i) =          dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                    +difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                    -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                    -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                    -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                    -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                    +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll)  &
-                                    +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld) 
-                  write(*,*)'new_phi',i,phi(i)
-                  write(*,*)'new_phi_dir',i,dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                    -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                    -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                    +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll) 
-                  if((forc_sols+forc_soll)/=0.)then
-                     write(*,*)'new_phi_dir_per',i,(dirdn_rate(i,1)*forc_sols+dirdn_rate(i,2)*forc_soll       &
-                                       -(dirup_rate(i,1)*forc_sols+dirup_rate(i,2)*forc_soll)      &
-                                       -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                       +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll))/(forc_sols+forc_soll) 
-                  endif
-                  write(*,*)'new_phi_dif',i,difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                    -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                    -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                    +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld) 
-                  if((forc_solsd+forc_solld) /=0.)then
-                     write(*,*)'new_phi_dif_per',i,(difdn_rate(i,1)*forc_solsd+difdn_rate(i,2)*forc_solld      &
-                                       -(difup_rate(i,1)*forc_solsd+difup_rate(i,2)*forc_solld)    &
-                                       -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                       +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld))/ (forc_solsd+forc_solld) 
-                  endif
-               elseif (i > kfrsnl3-1) then
-                  phi(i) =          dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll       &
-                                    +difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld      &
-                                    -(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll)      &
-                                    -(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld)    &
-                                    -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                    -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                    +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll)  &
-                                    +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld) 
-                  write(*,*)'new_phi',i,phi(i)
-                  write(*,*)'new_phi_dir',i,dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll       &
-                                    -(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll)      &
-                                    -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                    +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll)
-                  if((forc_sols+forc_soll)/=0.)then
-                     write(*,*)'new_phi_dir_per',i,(dirdn_rate(i+1,1)*forc_sols+dirdn_rate(i+1,2)*forc_soll       &
-                                       -(dirup_rate(i+1,1)*forc_sols+dirup_rate(i+1,2)*forc_soll)      &
-                                       -(dirdn_rate(i+2,1)*forc_sols+dirdn_rate(i+2,2)*forc_soll)    &
-                                       +(dirup_rate(i+2,1)*forc_sols+dirup_rate(i+2,2)*forc_soll))/(forc_sols+forc_soll) 
-                  endif
-                  write(*,*)'new_phi_dif',i,difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld      &
-                                    -(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld)    &
-                                    -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                    +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld)
-                  if((forc_solsd+forc_solld) /=0.)then 
-                     write(*,*)'new_phi_dif_per',i,(difdn_rate(i+1,1)*forc_solsd+difdn_rate(i+1,2)*forc_solld      &
-                                       -(difup_rate(i+1,1)*forc_solsd+difup_rate(i+1,2)*forc_solld)    &
-                                       -(difdn_rate(i+2,1)*forc_solsd+difdn_rate(i+2,2)*forc_solld)  &
-                                       +(difup_rate(i+2,1)*forc_solsd+difup_rate(i+2,2)*forc_solld) )/(forc_solsd+forc_solld) 
-                  endif
-               endif                  
-            enddo
-            phi_up =          (dirup_rate(snl_top,1)*forc_sols+dirup_rate(snl_top,2)*forc_soll)  &
-                              +(difup_rate(snl_top,1)*forc_solsd+difup_rate(snl_top,2)*forc_solld)
-            write(*,*)'new_up',phi_up
-            if((forc_sols+forc_soll)/=0.)then
-               write(*,*)'up_dir_per',(dirup_rate(snl_top,1)*forc_sols+dirup_rate(snl_top,2)*forc_soll)/(forc_sols+forc_soll) 
-            endif
-            if((forc_solsd+forc_solld) /=0.)then
-               write(*,*)'up_dif_per',(difup_rate(snl_top,1)*forc_solsd+difup_rate(snl_top,2)*forc_solld)/(forc_solsd+forc_solld)
-            endif
-
-
-            
-
-            ! phi_up = flx_abs_upd(1)*forc_sols+flx_abs_upd(2)*forc_soll &
-            !          +flx_abs_upi(1)*forc_solsd+flx_abs_upi(2)*forc_solld
-            write(*,*)'old_up',flx_abs_upd(1)*forc_sols+flx_abs_upd(2)*forc_soll &
+            phi_up = flx_abs_upd(1)*forc_sols+flx_abs_upd(2)*forc_soll &
                      +flx_abs_upi(1)*forc_solsd+flx_abs_upi(2)*forc_solld
+            phi_down = flx_abs_dnd1(1)*forc_sols+flx_abs_dnd1(2)*forc_soll &
+                     +flx_abs_dni1(1)*forc_solsd+flx_abs_dni1(2)*forc_solld
+            ! write(*,*)'phi_down',phi_down
             phi_srf = 0 
-
+            ! if(kfrsnl3<10) then 
+            !    write(*,*)'kfrsnl3-1down',flx_interfaced(kfrsnl3-1,1)*forc_sols+flx_interfaced(kfrsnl3-1,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3-1,1)*forc_solsd+flx_interfacei(kfrsnl3-1,2)*forc_solld
+            !    write(*,*)'kfrsnl3down',flx_interfaced(kfrsnl3,1)*forc_sols+flx_interfaced(kfrsnl3,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3,1)*forc_solsd+flx_interfacei(kfrsnl3,2)*forc_solld
+            !    write(*,*)'kfrsnl3+1down',flx_interfaced(kfrsnl3+1,1)*forc_sols+flx_interfaced(kfrsnl3+1,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3+1,1)*forc_solsd+flx_interfacei(kfrsnl3+1,2)*forc_solld
+            !    write(*,*)'kfrsnl3+2down',flx_interfaced(kfrsnl3+2,1)*forc_sols+flx_interfaced(kfrsnl3+2,2)*forc_soll &
+            !    +flx_interfacei(kfrsnl3+2,1)*forc_solsd+flx_interfacei(kfrsnl3+2,2)*forc_solld
+            ! endif
             if (snl<0.or.lake_icefrac(1)== 1 ) then 
                phi_srf = flx_absd(snl_top ,1)*forc_sols+flx_absd(snl_top,2)*forc_soll&
                         +flx_absi(snl_top,1)*forc_solsd+flx_absi(snl_top,2)*forc_solld
@@ -4061,39 +3755,29 @@ MODULE MOD_Lake
                   phi_srf = phi_srf_sum
                enddo
             endif
-            write(*,*)'old_srf',phi_srf
-            if (snl<0.or.lake_icefrac(1)== 1 ) then 
-               phi_srf = phi(snl_top) 
-            elseif (srf_lyr == 1) then 
-               phi_srf = phi(srf_lyr) 
-            elseif(srf_lyr > 1) then 
-               phi_srf_sum = 0
-               do i = 1, srf_lyr
-                  phi_srf_sum = phi_srf_sum + phi(i) 
-               enddo
-               phi_srf = phi_srf_sum
-            endif
-            write(*,*)'new_srf',phi_srf
-            if(snl<0.or.lake_icefrac(1)==1)then 
-               phi(snl_top) = 0
-            else 
-               do i = snl_top, nl_lake
-                  if(i>0.and.i<=srf_lyr) then 
-                     phi(i)= 0 
-                  endif 
-               enddo 
-            endif
-            do i = 1,nl_lake
-               if(z_lake(i)-0.5*dz_lake(i)<za(idlak).and.z_lake(i)+0.5*dz_lake(i)>za(idlak)) then
-                  write(*,*)'change srf_lyr' 
-                  phi_srf = phi_srf +(za(idlak)+0.5*dz_lake(i)-z_lake(i))/dz_lake(i)*phi(i)
-                  phi(i) = (z_lake(i)+0.5*dz_lake(i)-za(idlak))/dz_lake(i)*phi(i)
-               endif 
-            enddo 
+            ! write(*,*)'srf',srf_lyr,'phi_srf',phi_srf
             if(forc_sols+forc_soll+forc_solsd+forc_solld==0) then 
                srf_prop = 1
             else
                srf_prop = phi_srf/(forc_sols+forc_soll+forc_solsd+forc_solld-phi_up)
+            endif
+            ! write(*,*)'srf_prop',srf_prop
+            if(snl<0.or.lake_icefrac(1)==1)then 
+               phi(snl_top) = 0
+               do i = snl_top+1, nl_lake
+                  phi(i) = flx_absd(i,1)*forc_sols+flx_absd(i,2)*forc_soll&
+                           +flx_absi(i,1)*forc_solsd+flx_absi(i,2)*forc_solld
+               enddo
+            else 
+               do i = snl_top, nl_lake
+                  if(i>0.and.i<=srf_lyr) then 
+                     ! write(*,*)'i>0.and.i<=srf_lyr',i
+                     phi(i)= 0 
+                  else 
+                     phi(i) = flx_absd(i,1)*forc_sols+flx_absd(i,2)*forc_soll&
+                           +flx_absi(i,1)*forc_solsd+flx_absi(i,2)*forc_solld
+                  endif 
+               enddo 
             endif
             ! write(*,*)'in',forc_sols+forc_soll+forc_solsd+forc_solld
             ! write(*,*)'innir',forc_soll+forc_solld
@@ -4101,11 +3785,20 @@ MODULE MOD_Lake
             do i = snl_top,nl_lake
                phisum = phisum+phi(i)
             enddo
-  
-            ! phi_soil = (flx_abs_dnd(1)*forc_sols+flx_abs_dnd(2)*forc_soll &
-            !             +flx_abs_dni(1)*forc_solsd+flx_abs_dni(2)*forc_solld)
-            phi_soil = dirdn_rate(snl_btm_itf,1)*forc_sols+dirdn_rate(snl_btm_itf,2)*forc_soll       &
-                                    +difdn_rate(snl_btm_itf,1)*forc_solsd+difdn_rate(snl_btm_itf,2)*forc_solld 
+            do i = snl_top,nl_lake
+               write(*,*) 'direct_vis',i, flx_absd(i,1)*forc_sols
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'diffuse_vis',i, flx_absi(i,1)*forc_solsd
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'vis',i, (flx_absd(i,1)*forc_sols+flx_absi(i,1)*forc_solsd)
+            enddo
+            do i = snl_top,nl_lake
+               write(*,*) 'nir',i, (flx_absd(i,2)*forc_soll+flx_absi(i,2)*forc_solld)
+            enddo            
+            phi_soil = (flx_abs_dnd(1)*forc_sols+flx_abs_dnd(2)*forc_soll &
+                        +flx_abs_dni(1)*forc_solsd+flx_abs_dni(2)*forc_solld)
             do i = 1, nl_lake 
                write(*,*)'twostream',i,phi(i)
             end do 
@@ -4146,7 +3839,7 @@ MODULE MOD_Lake
                lakealb_direct_shortwave = lakealb_direct_vis*flx_slr(1, slr_zen+1) + lakealb_direct_nir*(flx_slr(2, slr_zen+1) &
                                                                                  + flx_slr(3, slr_zen+1) + flx_slr(4, slr_zen+1) &
                                                                                  + flx_slr(5, slr_zen+1) )         
-               write(*,*)'lakealb_direct_shortwave',lakealb_direct_shortwave
+               ! write(*,*)'lakealb_direct_shortwave',lakealb_direct_shortwave
             ! endif
             ! write(*,*)'forc_solsd+forc_solld',forc_sols+forc_soll
             ! if (forc_solsd+forc_solld/=0.) then 
